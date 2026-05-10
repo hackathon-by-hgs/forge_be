@@ -1,8 +1,9 @@
-import { Global, Module } from '@nestjs/common';
+import { Global, Module, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { AuditService } from '../../common/audit/audit.service';
+import { SettingsModule } from '../settings/settings.module';
 import { DashboardAuthController } from './dashboard-auth.controller';
 import { DashboardAuthService } from './dashboard-auth.service';
 import { EmailService } from './email.service';
@@ -19,6 +20,7 @@ import { JwtUserStrategy } from './strategies/jwt-user.strategy';
         signOptions: { expiresIn: config.get<number>('jwt.userAccessTtlSeconds') },
       }),
     }),
+    forwardRef(() => SettingsModule),
   ],
   controllers: [DashboardAuthController],
   providers: [DashboardAuthService, EmailService, JwtUserStrategy, AuditService],

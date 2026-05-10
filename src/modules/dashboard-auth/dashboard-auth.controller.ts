@@ -33,7 +33,9 @@ import {
   ResetPasswordDto,
   VerifyEmailDto,
 } from './dto/register.dto';
+import { BusinessRegisterDto } from './dto/business-register.dto';
 import { LoginResponseDto, SessionUserDto } from './dto/session.dto';
+import { AcceptInvitationDto } from '../settings/dto/team.dto';
 
 @ApiTags('Dashboard Auth')
 @Controller('dashboard/auth')
@@ -46,20 +48,25 @@ export class DashboardAuthController {
   @Post('email/register')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
-    summary: 'Email + password signup. Sets refresh cookie, returns access token.',
+    summary: 'Generic email + password signup. Restricted to non-owner employer roles only.',
     description: [
-      '**Audience:** Employer-web + bank-web dashboards (`bearer-user` JWT scheme).',
-      '**Powers:** `/signup` page on either dashboard.',
+      '**Audience:** Employer-web — narrow surface only.',
+      '**Powers:** Edge cases where an admin/manager already knows their employer scope (rare). The ',
+      'mainstream paths are `/dashboard/auth/business/register` for owners and `/settings/team/invite` ',
+      '+ accept-token flow for everyone else.',
       '',
-      '**⚠ Open product gap (HANDOFF.md "Open product question"):** self-signup with `role: bank_credit_officer` ',
-      'or `role: business_owner` currently produces an orphan user with no `bankId`/`employerId` scope. ',
-      'Phase 1 will tighten this to reject those roles and route them through dedicated paths ',
-      '(`/dashboard/auth/business/register` for self-serve business owners; `/dashboard/team/invite` for team additions; ',
-      'platform-admin-only for new bank entities).',
+      '**Rejected roles (400 VALIDATION_FAILED):** `worker`, `platform_admin`, `business_owner`, ',
+      '`bank_credit_officer`, `bank_risk_analyst`. Owners must use the business endpoint; bank users are ',
+      'invitation-only because banks are vetted credit institutions.',
     ].join('\n\n'),
   })
   @ApiBody({ type: RegisterDto })
   @ApiResponse({ status: 201, type: LoginResponseDto })
+  @ApiResponse({
+    status: 400,
+    type: ErrorResponseDto,
+    description: 'VALIDATION_FAILED — role rejected (use /business/register for owners; bank/admin/manager via invite).',
+  })
   @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'EMAIL_ALREADY_REGISTERED' })
   async register(
     @Body() body: RegisterDto,
@@ -67,6 +74,71 @@ export class DashboardAuthController {
     @Res({ passthrough: true }) res: Response,
   ): Promise<LoginResponseDto> {
     const out = await this.auth.register(body, req);
+    this.setRefreshCookie(res, out.refreshToken, out.refreshExpiresAt);
+    return {
+      accessToken: out.accessToken,
+      accessExpiresAt: out.accessExpiresAt.toISOString(),
+      user: out.user,
+    };
+  }
+
+  @Post('business/register')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Self-serve business signup. Creates Employer + owner User atomically.',
+    description: [
+      '**Audience:** Employer-web only.',
+      '**Powers:** `/signup/business` page on employer-web — closes the BACKEND_BRIEF "Open product question" auth gap.',
+      '**Behavior:** One transaction creates the `Employer` row + a `User` with `role=business_owner` scoped to it. ',
+      'Issues access token and HttpOnly refresh cookie on success, identical envelope to `/email/login`. ',
+      'Sends a verification email to the owner via Resend.',
+      '',
+      '> The legacy `/email/register` rejects `business_owner` since this endpoint exists. Bank entities are ',
+      'created out-of-band by `platform_admin`; bank users join via team invitation, not self-signup.',
+    ].join('\n\n'),
+  })
+  @ApiBody({ type: BusinessRegisterDto })
+  @ApiResponse({ status: 201, type: LoginResponseDto })
+  @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'EMAIL_ALREADY_REGISTERED' })
+  async registerBusiness(
+    @Body() body: BusinessRegisterDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<LoginResponseDto> {
+    const out = await this.auth.registerBusiness(body, req);
+    this.setRefreshCookie(res, out.refreshToken, out.refreshExpiresAt);
+    return {
+      accessToken: out.accessToken,
+      accessExpiresAt: out.accessExpiresAt.toISOString(),
+      user: out.user,
+    };
+  }
+
+  @Post('team/accept')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Claim a team invitation token, create the User, and start a session.',
+    description: [
+      '**Audience:** Employer-web — public (no auth required) entry point.',
+      '**Powers:** `/auth/team/accept?token=…` page reached from a team-invite email. The page collects ',
+      'fullName + password and POSTs them with the token here. On success, sets the refresh cookie and ',
+      'returns access token + user shape, identical to `/email/login`.',
+      '',
+      '**Behavior:** Token is single-use. Email is auto-marked verified (the recipient demonstrated control ',
+      'by following the link). User is scoped to the inviter\'s `employerId`. Companion send-invite endpoint ',
+      'is `POST /v1/settings/team/invite`.',
+    ].join('\n\n'),
+  })
+  @ApiBody({ type: AcceptInvitationDto })
+  @ApiResponse({ status: 201, type: LoginResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'INVITATION_INVALID' })
+  @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'EMAIL_ALREADY_REGISTERED' })
+  async acceptTeamInvite(
+    @Body() body: AcceptInvitationDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<LoginResponseDto> {
+    const out = await this.auth.acceptTeamInvite(body, req);
     this.setRefreshCookie(res, out.refreshToken, out.refreshExpiresAt);
     return {
       accessToken: out.accessToken,

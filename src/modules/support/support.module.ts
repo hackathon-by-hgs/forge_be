@@ -3,9 +3,11 @@ import { HelpController } from './help.controller';
 import { HelpService } from './help.service';
 import { UploadsController } from './uploads.controller';
 import { UploadsService } from './uploads.service';
+import { LivenessService } from './liveness.service';
+import { LivenessProviderFactory } from './liveness.provider';
 
 @Module({
   controllers: [HelpController, UploadsController],
-  providers: [HelpService, UploadsService],
+  providers: [HelpService, UploadsService, LivenessService, LivenessProviderFactory],
 })
 export class SupportModule {}

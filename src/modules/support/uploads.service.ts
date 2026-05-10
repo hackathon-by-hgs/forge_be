@@ -11,6 +11,9 @@ const ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/heic']);
 const MAX_BYTES: Record<UploadPurpose, number> = {
   [UploadPurpose.WorkerAvatar]: 8 * 1024 * 1024,
   [UploadPurpose.ClockOutProof]: 12 * 1024 * 1024,
+  // LivenessSelfie is reachable only via POST /uploads/liveness; the dumb
+  // /uploads route rejects this purpose below. Cap kept symmetric for safety.
+  [UploadPurpose.LivenessSelfie]: 12 * 1024 * 1024,
 };
 
 @Injectable()
@@ -26,6 +29,15 @@ export class UploadsService {
     file: { originalname: string; mimetype: string; size: number; buffer: Buffer },
   ) {
     if (!file) throw new AppError(400, 'MISSING_FILE', 'No file part.');
+    if (purpose === UploadPurpose.LivenessSelfie) {
+      // Liveness uploads must go through POST /uploads/liveness so the AI
+      // verdict runs inline. Refuse here to prevent bypassing verification.
+      throw new AppError(
+        400,
+        'INVALID_PURPOSE',
+        'Liveness selfies must be submitted via POST /uploads/liveness.',
+      );
+    }
     if (!ALLOWED_MIME.has(file.mimetype)) {
       throw new AppError(415, 'UNSUPPORTED_TYPE', `MIME ${file.mimetype} not supported.`);
     }

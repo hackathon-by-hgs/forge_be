@@ -27,9 +27,20 @@ export const appConfig = () => ({
   },
 
   email: {
-    from: process.env.EMAIL_FROM ?? 'no-reply@forge.app',
-    // Resend / Postmark API key — log to console if unset (dev mode).
+    // Provider: 'resend' (default) | 'stub'. 'stub' just logs — useful in dev.
+    provider: (process.env.EMAIL_PROVIDER ?? (process.env.EMAIL_API_KEY ? 'resend' : 'stub')) as 'resend' | 'stub',
+    // From address. With Resend, the domain MUST be verified in the Resend dashboard.
+    // Format may include a display name, e.g. 'Forge <no-reply@forge.app>'.
+    from: process.env.EMAIL_FROM ?? 'Forge <no-reply@forge.app>',
+    // Optional reply-to address surfaced on outbound mail.
+    replyTo: process.env.EMAIL_REPLY_TO ?? null,
+    // Resend API key (`re_…`). When unset we fall back to the 'stub' provider.
     apiKey: process.env.EMAIL_API_KEY ?? null,
+    // Per-audience dashboard base URLs — used to mint verify/reset links pointing
+    // to the correct subdomain. Falls back to APP_BASE_URL.
+    employerBaseUrl: process.env.EMPLOYER_APP_BASE_URL ?? process.env.APP_BASE_URL ?? 'http://localhost:7070',
+    bankBaseUrl: process.env.BANK_APP_BASE_URL ?? process.env.APP_BASE_URL ?? 'http://localhost:7080',
+    // Generic fallback (legacy callers + worker-mobile email links if/when added).
     appBaseUrl: process.env.APP_BASE_URL ?? 'http://localhost:3000',
   },
 
@@ -44,6 +55,30 @@ export const appConfig = () => ({
     dir: process.env.UPLOAD_DIR ?? './uploads',
     publicBaseUrl: process.env.UPLOAD_PUBLIC_BASE_URL ?? 'http://localhost:3000/uploads',
     ttlHours: parseInt(process.env.UPLOAD_TTL_HOURS ?? '24', 10),
+  },
+
+  // Liveness / Smart Selfie verification — Smile Identity (Lagos).
+  // When `partnerId` or `apiKey` is unset, the provider falls back to a 'stub'
+  // that always passes — matches the email-stub pattern so dev/local works
+  // without vendor credentials. Production MUST set both.
+  liveness: {
+    provider: (process.env.LIVENESS_PROVIDER ?? (process.env.SMILE_PARTNER_ID ? 'smile' : 'stub')) as 'smile' | 'stub',
+    smile: {
+      partnerId: process.env.SMILE_PARTNER_ID ?? null,
+      apiKey: process.env.SMILE_API_KEY ?? null,
+      // 'sandbox' (testapi.smileidentity.com) or 'production' (api.smileidentity.com).
+      environment: (process.env.SMILE_ENVIRONMENT ?? 'sandbox') as 'sandbox' | 'production',
+      // Optional explicit override; otherwise derived from `environment`.
+      baseUrl: process.env.SMILE_BASE_URL ?? null,
+      // Confidence floor — Smile rejections come back as ResultCodes; this
+      // floor catches borderline-low confidence on success codes.
+      minConfidence: parseFloat(process.env.LIVENESS_MIN_CONFIDENCE ?? '0.6'),
+    },
+    // Per-worker rate limit on /uploads/liveness — defense against abuse + cost control.
+    rateLimit: {
+      attempts: parseInt(process.env.LIVENESS_RATE_LIMIT_ATTEMPTS ?? '5', 10),
+      windowSeconds: parseInt(process.env.LIVENESS_RATE_LIMIT_WINDOW_SECONDS ?? '600', 10),
+    },
   },
 
   rules: {

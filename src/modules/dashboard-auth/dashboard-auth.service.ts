@@ -18,8 +18,11 @@ import {
   ResetPasswordDto,
   VerifyEmailDto,
 } from './dto/register.dto';
+import { BusinessRegisterDto } from './dto/business-register.dto';
 import { LoginResponseDto, SessionUserDto } from './dto/session.dto';
 import { UserJwtPayload } from './strategies/jwt-user.strategy';
+import { TeamService } from '../settings/team.service';
+import { AcceptInvitationDto } from '../settings/dto/team.dto';
 
 interface RefreshPayload {
   sub: string;
@@ -37,12 +40,31 @@ export class DashboardAuthService {
     private readonly config: ConfigService,
     private readonly email: EmailService,
     private readonly audit: AuditService,
+    private readonly teams: TeamService,
   ) {}
 
   // ── Register ───────────────────────────────────────────────────────────────
   async register(body: RegisterDto, req: Request): Promise<{ accessToken: string; refreshToken: string; refreshExpiresAt: Date; accessExpiresAt: Date; user: SessionUserDto }> {
-    if (body.role === Role.Worker || body.role === Role.PlatformAdmin) {
-      throw new AppError(400, 'VALIDATION_FAILED', 'This role cannot self-register.');
+    // Worker + platform_admin: never self-serve.
+    // business_owner: must use POST /dashboard/auth/business/register so the
+    //   Employer + owner User are created in one transaction (no orphans).
+    // bank_*: invite-only — Banks are vetted credit institutions; ops creates
+    //   the Bank row + first credit officer manually, then officers join via
+    //   team invitation (BACKEND_BRIEF "Open product question").
+    if (
+      body.role === Role.Worker ||
+      body.role === Role.PlatformAdmin ||
+      body.role === Role.BusinessOwner ||
+      body.role === Role.BankCreditOfficer ||
+      body.role === Role.BankRiskAnalyst
+    ) {
+      throw new AppError(
+        400,
+        'VALIDATION_FAILED',
+        body.role === Role.BusinessOwner
+          ? 'Use /dashboard/auth/business/register to create a business owner account.'
+          : 'This role cannot self-register. Ask an admin for an invitation.',
+      );
     }
     const existing = await this.prisma.user.findUnique({ where: { email: body.email.toLowerCase() } });
     if (existing) {
@@ -73,7 +95,7 @@ export class DashboardAuthService {
         expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
       },
     });
-    void this.email.sendVerification(user.email, verifyToken);
+    void this.email.sendVerification(user.email, verifyToken, user.role as Role);
 
     const tokens = await this.issueTokens(user.id, user.email, user.role as Role, user.employerId, user.bankId, req);
 
@@ -90,6 +112,149 @@ export class DashboardAuthService {
       ...tokens,
       user: this.toSessionUser(user),
     };
+  }
+
+  // ── Business signup (Employer + owner User in one transaction) ───────────
+  async registerBusiness(
+    body: BusinessRegisterDto,
+    req: Request,
+  ): Promise<{ accessToken: string; refreshToken: string; refreshExpiresAt: Date; accessExpiresAt: Date; user: SessionUserDto }> {
+    const email = body.email.toLowerCase();
+    const existing = await this.prisma.user.findUnique({ where: { email } });
+    if (existing) {
+      throw new AppError(409, 'EMAIL_ALREADY_REGISTERED', 'An account with this email already exists.');
+    }
+
+    const passwordHash = await argon2.hash(body.password);
+    const userId = newId(ID_PREFIXES.user);
+    const employerId = newId(ID_PREFIXES.employer);
+    const verifyToken = this.randomToken();
+    const verifyTokenId = newId(ID_PREFIXES.emailToken);
+
+    const user = await this.prisma.$transaction(async (tx) => {
+      await tx.employer.create({
+        data: {
+          id: employerId,
+          businessName: body.businessName.trim(),
+          type: body.businessType,
+          phoneNumber: body.businessPhone ?? null,
+          registeredLat: body.registeredLocation.lat,
+          registeredLng: body.registeredLocation.lng,
+          registeredNeighborhood: body.registeredLocation.neighborhood.trim(),
+          registeredAddress: body.registeredLocation.address.trim(),
+        },
+      });
+
+      const u = await tx.user.create({
+        data: {
+          id: userId,
+          email,
+          fullName: body.fullName.trim(),
+          phone: body.phone ?? null,
+          passwordHash,
+          role: Role.BusinessOwner,
+          employerId,
+        },
+      });
+
+      await tx.emailToken.create({
+        data: {
+          id: verifyTokenId,
+          userId: u.id,
+          purpose: 'verify',
+          tokenHash: this.hashToken(verifyToken),
+          expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+        },
+      });
+
+      return u;
+    });
+
+    void this.email.sendVerification(user.email, verifyToken, user.role as Role);
+
+    const tokens = await this.issueTokens(
+      user.id,
+      user.email,
+      user.role as Role,
+      user.employerId,
+      user.bankId,
+      req,
+    );
+
+    await this.audit.record({
+      actor: { type: 'user', id: user.id },
+      action: 'business.register',
+      entityType: 'employer',
+      entityId: employerId,
+      after: {
+        businessName: body.businessName,
+        businessType: body.businessType,
+        ownerEmail: user.email,
+      },
+      request: req,
+    });
+
+    return {
+      ...tokens,
+      user: this.toSessionUser(user),
+    };
+  }
+
+  // ── Accept team invitation (claim token + create User + start session) ───
+  async acceptTeamInvite(
+    body: AcceptInvitationDto,
+    req: Request,
+  ): Promise<{ accessToken: string; refreshToken: string; refreshExpiresAt: Date; accessExpiresAt: Date; user: SessionUserDto }> {
+    const invitation = await this.teams.claimByToken(body.token);
+
+    const existing = await this.prisma.user.findUnique({ where: { email: invitation.email } });
+    if (existing) {
+      // Edge case: someone signed up for a different employer between invite-send and accept.
+      throw new AppError(409, 'EMAIL_ALREADY_REGISTERED', 'An account with this email already exists.');
+    }
+
+    const passwordHash = await argon2.hash(body.password);
+    const userId = newId(ID_PREFIXES.user);
+
+    const user = await this.prisma.$transaction(async (tx) => {
+      const u = await tx.user.create({
+        data: {
+          id: userId,
+          email: invitation.email,
+          fullName: body.fullName.trim(),
+          passwordHash,
+          role: invitation.role,
+          employerId: invitation.employerId,
+          // Email is verified-by-claim — they came in via the link we sent.
+          emailVerifiedAt: new Date(),
+        },
+      });
+      await tx.teamInvitation.update({
+        where: { id: invitation.id },
+        data: { acceptedAt: new Date() },
+      });
+      return u;
+    });
+
+    const tokens = await this.issueTokens(
+      user.id,
+      user.email,
+      user.role as Role,
+      user.employerId,
+      user.bankId,
+      req,
+    );
+
+    await this.audit.record({
+      actor: { type: 'user', id: user.id },
+      action: 'employer.team_invite_accept',
+      entityType: 'user',
+      entityId: user.id,
+      after: { email: user.email, role: user.role, employerId: user.employerId },
+      request: req,
+    });
+
+    return { ...tokens, user: this.toSessionUser(user) };
   }
 
   // ── Login ──────────────────────────────────────────────────────────────────
@@ -206,7 +371,7 @@ export class DashboardAuthService {
         expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1h
       },
     });
-    await this.email.sendReset(user.email, token);
+    await this.email.sendReset(user.email, token, user.role as Role);
   }
 
   async reset(body: ResetPasswordDto): Promise<void> {

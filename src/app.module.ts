@@ -14,6 +14,10 @@ import { MeModule } from './modules/me/me.module';
 import { SupportModule } from './modules/support/support.module';
 // Dashboard (new — Phase 0 onwards)
 import { DashboardAuthModule } from './modules/dashboard-auth/dashboard-auth.module';
+import { EmployerModule } from './modules/employer/employer.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
+import { SearchModule } from './modules/search/search.module';
+import { SettingsModule } from './modules/settings/settings.module';
 
 @Module({
   imports: [
@@ -31,6 +35,10 @@ import { DashboardAuthModule } from './modules/dashboard-auth/dashboard-auth.mod
 
     // Web dashboards (employer + bank)
     DashboardAuthModule,
+    EmployerModule,
+    NotificationsModule,
+    SearchModule,
+    SettingsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
