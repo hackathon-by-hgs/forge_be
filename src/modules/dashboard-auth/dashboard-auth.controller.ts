@@ -24,6 +24,7 @@ import {
   CurrentUser,
 } from '../../common/decorators/current-user.decorator';
 import { ErrorResponseDto } from '../../common/dto/error-response.dto';
+import { AppError } from '../../common/utils/app-error';
 import { DashboardAuthService } from './dashboard-auth.service';
 import {
   ForgotPasswordDto,
@@ -166,12 +167,12 @@ export class DashboardAuthController {
     ].join('\n\n'),
   })
   @ApiResponse({ status: 200, type: LoginResponseDto })
-  @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'TOKEN_INVALID | TOKEN_EXPIRED' })
+  @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'NO_REFRESH_COOKIE | TOKEN_INVALID | TOKEN_EXPIRED' })
   async refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response): Promise<LoginResponseDto> {
     const cookieName = this.config.get<string>('cookies.refreshName')!;
     const token = (req.cookies as Record<string, string> | undefined)?.[cookieName];
     if (!token) {
-      throw new Error('NO_REFRESH_COOKIE');
+      throw new AppError(401, 'NO_REFRESH_COOKIE', 'No refresh cookie present.');
     }
     const out = await this.auth.refresh(token, req);
     this.setRefreshCookie(res, out.refreshToken, out.refreshExpiresAt);
