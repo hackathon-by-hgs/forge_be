@@ -54,6 +54,35 @@ export class EmailService {
     await this.send({ to, subject, html, text });
   }
 
+  async sendInvoice(args: {
+    to: string;
+    businessName: string;
+    invoiceNumber: string;
+    totalNaira: number;
+    dueAt: string | null;
+    role: Role;
+  }): Promise<void> {
+    const url = `${this.audienceBaseUrl(args.role)}/payments/invoices`;
+    const formattedTotal = `₦${args.totalNaira.toLocaleString('en-NG')}`;
+    const dueLine = args.dueAt
+      ? `Due ${new Date(args.dueAt).toLocaleDateString('en-NG', { year: 'numeric', month: 'short', day: 'numeric' })}`
+      : '';
+    const subject = `${args.businessName} sent invoice ${args.invoiceNumber}`;
+    const text = `${args.businessName} sent you invoice ${args.invoiceNumber} for ${formattedTotal}.\n\n${dueLine}\n\nReview it: ${url}`;
+    const html = this.layout({
+      preview: `Invoice ${args.invoiceNumber} — ${formattedTotal}`,
+      heading: `Invoice ${escapeHtml(args.invoiceNumber)}`,
+      body:
+        `<p><strong>${escapeHtml(args.businessName)}</strong> sent an invoice for ` +
+        `<strong>${escapeHtml(formattedTotal)}</strong>.</p>` +
+        (dueLine ? `<p style="margin-top:8px;color:#475569;">${escapeHtml(dueLine)}</p>` : ''),
+      ctaLabel: 'View invoice',
+      ctaUrl: url,
+      footer: 'PDF attachments come with the full Phase 5 rollout — for now, review the line items in the dashboard.',
+    });
+    await this.send({ to: args.to, subject, html, text });
+  }
+
   async sendTeamInvite(args: {
     to: string;
     token: string;

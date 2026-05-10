@@ -15,12 +15,33 @@ export class IdempotencyService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Run `compute` exactly once per (workerId, key, request body). Subsequent
-   * calls with the same key return the cached response. A retry with the
-   * same key but a different body yields a 409 CONFLICT.
+   * Worker-mobile entry point. Run `compute` exactly once per (workerId, key, body).
+   * Subsequent calls with the same key return the cached response. A retry with the
+   * same key but a different body yields 409 CONFLICT.
    */
   async run<T>(
     args: { workerId: string; key: string; method: string; path: string; bodyForHash: unknown },
+    compute: () => Promise<{ status: number; body: T }>,
+  ): Promise<{ status: number; body: T }> {
+    return this.runWithActor('worker', args.workerId, args, compute);
+  }
+
+  /**
+   * Dashboard entry point. Same semantics as `run` but keyed on the dashboard
+   * user's id (the `User.id`, not an employer or worker id) so a single user's
+   * retries dedupe regardless of which employer they're operating on.
+   */
+  async runForUser<T>(
+    args: { userId: string; key: string; method: string; path: string; bodyForHash: unknown },
+    compute: () => Promise<{ status: number; body: T }>,
+  ): Promise<{ status: number; body: T }> {
+    return this.runWithActor('user', args.userId, args, compute);
+  }
+
+  private async runWithActor<T>(
+    actorKind: 'worker' | 'user',
+    actorId: string,
+    args: { key: string; method: string; path: string; bodyForHash: unknown },
     compute: () => Promise<{ status: number; body: T }>,
   ): Promise<{ status: number; body: T }> {
     const requestHash = this.hashRequest(args.bodyForHash);
@@ -31,7 +52,8 @@ export class IdempotencyService {
       if (existing.expiresAt < new Date()) {
         await this.prisma.idempotencyRecord.delete({ where: { key: args.key } });
       } else {
-        if (existing.workerId !== args.workerId || existing.requestHash !== requestHash) {
+        const storedActorId = actorKind === 'worker' ? existing.workerId : existing.userId;
+        if (storedActorId !== actorId || existing.requestHash !== requestHash) {
           throw new AppError(409, 'CONFLICT', 'Idempotency key reused with a different request body.');
         }
         const cached = JSON.parse(existing.responseBody) as CachedResponse;
@@ -46,7 +68,8 @@ export class IdempotencyService {
       await this.prisma.idempotencyRecord.create({
         data: {
           key: args.key,
-          workerId: args.workerId,
+          workerId: actorKind === 'worker' ? actorId : null,
+          userId: actorKind === 'user' ? actorId : null,
           method: args.method,
           path: args.path,
           requestHash,
