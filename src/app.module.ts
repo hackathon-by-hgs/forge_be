@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { appConfig } from './config/configuration';
@@ -18,13 +19,18 @@ import { DashboardAuthModule } from './modules/dashboard-auth/dashboard-auth.mod
 import { EmployerModule } from './modules/employer/employer.module';
 import { EmployerJobsModule } from './modules/employer-jobs/employer-jobs.module';
 import { EmployerPaymentsModule } from './modules/employer-payments/employer-payments.module';
+import { BankModule } from './modules/bank/bank.module';
+import { SquadModule } from './modules/squad/squad.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { SearchModule } from './modules/search/search.module';
 import { SettingsModule } from './modules/settings/settings.module';
+import { EmployerWorkersModule } from './modules/employer-workers/employer-workers.module';
+import { LifecycleModule } from './modules/lifecycle/lifecycle.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [appConfig] }),
+    ScheduleModule.forRoot(),
     PrismaModule,
     CommonModule,
 
@@ -41,10 +47,18 @@ import { SettingsModule } from './modules/settings/settings.module';
     DashboardAuthModule,
     EmployerModule,
     EmployerJobsModule,
+    EmployerWorkersModule,
     EmployerPaymentsModule,
+    BankModule,
     NotificationsModule,
     SearchModule,
     SettingsModule,
+
+    // Payment provider (global — exports SquadClient + mounts webhook)
+    SquadModule,
+
+    // Hire→clock-out lifecycle automation (cron jobs).
+    LifecycleModule,
   ],
   controllers: [AppController],
   providers: [AppService],

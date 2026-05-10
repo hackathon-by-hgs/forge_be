@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, Transaction, Worker } from '@prisma/client';
 import type { Request } from 'express';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -6,6 +6,7 @@ import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { AuditService } from '../../common/audit/audit.service';
 import { paginate } from '../../common/pagination/offset.dto';
+import { SquadClient } from '../squad/squad.client';
 import {
   CreateManualTransactionDto,
   TransactionDto,
@@ -22,9 +23,12 @@ const SUMMARY_WINDOW_DAYS = 90;
 
 @Injectable()
 export class EmployerTransactionsService {
+  private readonly logger = new Logger(EmployerTransactionsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly squad: SquadClient,
   ) {}
 
   async list(
@@ -153,7 +157,39 @@ export class EmployerTransactionsService {
       jobTitle = job.title;
     }
 
+    // Worker must have a default bank account on file before we can transfer
+    // — Squad needs (bank_code, account_number, account_name) and we don't
+    // store the worker's name redundantly per row.
+    const defaultAccount = await this.prisma.bankAccount.findFirst({
+      where: { workerId: body.workerId, isDefault: true },
+    });
+    if (!defaultAccount) {
+      throw new AppError(
+        422,
+        'WORKER_NO_BANK_ACCOUNT',
+        'The worker has not linked a default bank account yet — funds can\'t be transferred.',
+      );
+    }
+
     const id = newId(ID_PREFIXES.transaction);
+    const squadReference = this.squad.newReference('txn');
+
+    // Initiate the Squad transfer FIRST so we have the provider's reply before
+    // writing the row. If Squad errors out we still write the row but mark it
+    // failed so ops can investigate; we don't want a silent drop.
+    const outcome = await this.squad.transfer({
+      transactionReference: squadReference,
+      bankCode: defaultAccount.bankCode,
+      accountNumber: defaultAccount.accountNumber,
+      accountName: defaultAccount.accountName,
+      amountNaira: body.amountNaira,
+      remark: body.description?.slice(0, 80) ?? `Forge transfer to ${worker.name}`,
+    });
+
+    if (!outcome.ok) {
+      this.logger.error(`[squad] transfer rejected: ${outcome.message}`);
+    }
+
     const created = await this.prisma.transaction.create({
       data: {
         id,
@@ -165,9 +201,11 @@ export class EmployerTransactionsService {
         title: body.description?.slice(0, 80) ?? `Manual transfer to ${worker.name}`,
         subtitle: body.jobId ? `Linked to ${body.jobId}` : 'Manual payout',
         relatedJobId: body.jobId ?? null,
-        // Demo: rows start `pending` — the (not-yet-wired) Squad webhook would
-        // transition to `completed`. See BACKEND_BRIEF §11.6 + HANDOFF Phase 3 notes.
-        status: 'pending',
+        squadReference,
+        // Initial state: `processing` if Squad accepted, `failed` if it didn't.
+        // Final state lands via the Squad webhook (`completed` / `failed` / `reversed`).
+        status: outcome.ok ? 'processing' : 'failed',
+        failureReason: outcome.ok ? null : outcome.message,
       },
       include: { worker: { select: { id: true, name: true } } },
     });
@@ -177,7 +215,13 @@ export class EmployerTransactionsService {
       action: 'employer.transaction_create',
       entityType: 'transaction',
       entityId: id,
-      after: { workerId: body.workerId, amountNaira: body.amountNaira, jobId: body.jobId ?? null },
+      after: {
+        workerId: body.workerId,
+        amountNaira: body.amountNaira,
+        jobId: body.jobId ?? null,
+        squadReference,
+        squadOk: outcome.ok,
+      },
       request: req,
     });
 

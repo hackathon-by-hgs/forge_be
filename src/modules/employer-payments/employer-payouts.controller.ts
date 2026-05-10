@@ -121,6 +121,10 @@ export class EmployerPayoutsController {
     @Body() body: TopUpDto,
     @Req() req: Request,
   ): Promise<TopUpResponseDto> {
-    return this.payouts.topUp({ userId: me.userId, employerId: me.employerId }, body, req);
+    return this.payouts.topUp(
+      { userId: me.userId, employerId: me.employerId, email: me.email },
+      body,
+      req,
+    );
   }
 }

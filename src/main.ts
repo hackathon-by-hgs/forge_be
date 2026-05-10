@@ -12,6 +12,8 @@ import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['log', 'error', 'warn', 'debug', 'verbose'],
+    // Preserve raw request body for HMAC-signature verification on /v1/webhooks/*.
+    rawBody: true,
   });
 
   app.use(helmet({ contentSecurityPolicy: false }));

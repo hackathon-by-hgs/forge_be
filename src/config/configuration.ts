@@ -100,5 +100,22 @@ export const appConfig = () => {
     withdrawalMinNaira: parseInt(process.env.WITHDRAWAL_MIN_NAIRA ?? '500', 10),
     withdrawalFlatFeeNaira: parseInt(process.env.WITHDRAWAL_FLAT_FEE_NAIRA ?? '50', 10),
   },
+
+  // Squad payment provider — real transfers + checkout + webhooks. Without
+  // `SQUAD_SECRET_KEY` we fall back to a 'stub' that fakes everything (matches
+  // the email + liveness pattern so dev works without credentials). Production
+  // MUST set the real keys.
+  squad: {
+    provider: (process.env.SQUAD_PROVIDER ?? (process.env.SQUAD_SECRET_KEY ? 'real' : 'stub')) as 'real' | 'stub',
+    publicKey: process.env.SQUAD_PUBLIC_KEY ?? null,
+    secretKey: process.env.SQUAD_SECRET_KEY ?? null,
+    // HMAC-SHA512 secret used to verify inbound webhook signatures.
+    webhookSecret: process.env.SQUAD_WEBHOOK_SECRET ?? process.env.SQUAD_SECRET_KEY ?? null,
+    // 'sandbox' → sandbox-api-d.squadco.com; 'production' → api-d.squadco.com.
+    environment: (process.env.SQUAD_ENVIRONMENT ?? 'sandbox') as 'sandbox' | 'production',
+    baseUrl: process.env.SQUAD_BASE_URL ?? null,
+    // Hosted checkout return URL after a top-up. Defaults to the employer base URL + a query route.
+    checkoutCallbackUrl: process.env.SQUAD_CHECKOUT_CALLBACK_URL ?? null,
+  },
   });
 };
