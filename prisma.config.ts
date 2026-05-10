@@ -2,9 +2,10 @@ import 'dotenv/config';
 import path from 'node:path';
 import { defineConfig } from 'prisma/config';
 
-const url = process.env.DATABASE_URL;
-if (!url) throw new Error('DATABASE_URL is not set');
-
+// `prisma generate` runs at Docker build time when DATABASE_URL is unset.
+// Migrate / db push / seed run at runtime when it is. Pass the URL through
+// either way; Prisma will fail loudly with a clear message at the operation
+// level if the URL is needed and missing.
 export default defineConfig({
   schema: path.join('prisma', 'schema.prisma'),
   migrations: {
@@ -12,6 +13,6 @@ export default defineConfig({
     seed: 'tsx prisma/seed.ts',
   },
   datasource: {
-    url,
+    url: process.env.DATABASE_URL,
   },
 });
