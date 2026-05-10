@@ -1,7 +1,10 @@
 export type AppConfig = ReturnType<typeof appConfig>;
 
-export const appConfig = () => ({
-  nodeEnv: process.env.NODE_ENV ?? 'development',
+export const appConfig = () => {
+  const nodeEnv = process.env.NODE_ENV ?? 'development';
+  const isProd = nodeEnv === 'production';
+  return ({
+  nodeEnv,
   port: parseInt(process.env.PORT ?? '3000', 10),
 
   jwt: {
@@ -18,11 +21,22 @@ export const appConfig = () => ({
   },
 
   cookies: {
-    // Cookie domain: `.forge.app` in prod so employer.forge.app + bank.forge.app share the session.
-    // Leave undefined in dev so the cookie attaches to localhost.
+    // Cookie domain: set to `.forge.app` (or your apex) in prod ONLY if the FE and BE
+    // share a parent domain — then employer.forge.app + bank.forge.app share the session.
+    // When FE and BE live on unrelated hosts (e.g. forgefe.up.railway.app +
+    // forgebe-production.up.railway.app), leave this unset and rely on SameSite=None.
     domain: process.env.COOKIE_DOMAIN || undefined,
-    secure: (process.env.COOKIE_SECURE ?? (process.env.NODE_ENV === 'production' ? 'true' : 'false')) === 'true',
-    sameSite: (process.env.COOKIE_SAMESITE ?? 'lax') as 'lax' | 'strict' | 'none',
+
+    // Production: secure=true (browsers reject SameSite=None without it).
+    // Development: secure=false so the cookie attaches over plain http://localhost.
+    secure: (process.env.COOKIE_SECURE ?? (isProd ? 'true' : 'false')) === 'true',
+
+    // Production: SameSite=None so the refresh cookie is sent on cross-site fetch
+    // from the FE app (e.g. forgefe.up.railway.app → forgebe-production.up.railway.app).
+    // Development: SameSite=Lax so the cookie still attaches on localhost without https.
+    // Override with COOKIE_SAMESITE if FE + BE share a parent domain (use `lax`).
+    sameSite: (process.env.COOKIE_SAMESITE ?? (isProd ? 'none' : 'lax')) as 'lax' | 'strict' | 'none',
+
     refreshName: 'forge_rt',
   },
 
@@ -86,4 +100,5 @@ export const appConfig = () => ({
     withdrawalMinNaira: parseInt(process.env.WITHDRAWAL_MIN_NAIRA ?? '500', 10),
     withdrawalFlatFeeNaira: parseInt(process.env.WITHDRAWAL_FLAT_FEE_NAIRA ?? '50', 10),
   },
-});
+  });
+};

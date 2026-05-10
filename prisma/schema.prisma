@@ -193,6 +193,11 @@ model Employer {
   rating                   Float    @default(0)
   phoneNumber              String?  @map("phone_number")
 
+  // Worker-mobile employer profile (lib/features/employers/.../employer_detail_screen.dart).
+  // `verified` is admin-flipped after KYC; `bio` is owner-editable from the dashboard.
+  verified                 Boolean  @default(false)
+  bio                      String?
+
   // Computed snapshots — refreshed by background job.
   creditScore              Int      @default(50) @map("credit_score")
   totalLaborSpendNaira     Int      @default(0) @map("total_labor_spend_naira")

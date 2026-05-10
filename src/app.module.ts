@@ -12,6 +12,7 @@ import { WalletModule } from './modules/wallet/wallet.module';
 import { LoansModule } from './modules/loans/loans.module';
 import { MeModule } from './modules/me/me.module';
 import { SupportModule } from './modules/support/support.module';
+import { EmployersModule } from './modules/employers/employers.module';
 // Dashboard (new — Phase 0 onwards)
 import { DashboardAuthModule } from './modules/dashboard-auth/dashboard-auth.module';
 import { EmployerModule } from './modules/employer/employer.module';
@@ -26,12 +27,13 @@ import { SettingsModule } from './modules/settings/settings.module';
     CommonModule,
 
     // Worker mobile API
-    AuthModule,
+    AuthModule, 
     JobsModule,
     WalletModule,
     LoansModule,
     MeModule,
     SupportModule,
+    EmployersModule,
 
     // Web dashboards (employer + bank)
     DashboardAuthModule,

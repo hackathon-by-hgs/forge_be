@@ -122,6 +122,10 @@ async function bootstrap() {
     .addTag('Me', 'Worker mobile — profile, preferences, account deletion, phone change, push devices, in-app notifications')
     .addTag('Support', 'Worker mobile — public help articles + authenticated support tickets')
     .addTag('Uploads', 'Worker mobile — direct multipart upload (photos, proof, documents). Returns `upload_id` to reference downstream')
+    .addTag(
+      'Employers',
+      'Worker mobile — employer profile screen (`employer_detail_screen.dart`): hero, stats, about, active jobs, history.',
+    )
     // ── Dashboards (employer-web + bank-web) ───────────────────────────────
     .addTag(
       'Dashboard Auth',
