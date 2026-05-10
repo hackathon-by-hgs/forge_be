@@ -1,8 +1,15 @@
-// Forge backend — Prisma schema.
-// Provider is PostgreSQL by default. To use SQLite for local dev:
-//   1. set provider = "sqlite"
-//   2. set DATABASE_URL = "file:./dev.db"
-//   3. drop the @db.* native types and replace String[] with Json.
+// Forge backend — Prisma schema (Prisma 7).
+//
+// Two audiences share this schema:
+//   1. Worker mobile app (existing) — snake_case wire, integer Naira, OTP auth.
+//   2. Employer + Bank web dashboards (new, per BACKEND_BRIEF.md) — camelCase wire,
+//      integer Naira at boundary, email/password + roles + cookie refresh.
+//
+// Money is integer Naira throughout. The brief recommends kobo internally; we deviate
+// to keep the existing worker-mobile stack untouched. See DECISIONS.md.
+//
+// Existing rows are not migrated. New columns are nullable or have defaults so that
+// the worker-mobile flows keep working unchanged.
 
 generator client {
   provider = "prisma-client-js"
@@ -10,31 +17,43 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
-// ─── Identity ───────────────────────────────────────────────────────────────
+// ─── Worker mobile identity (existing) ──────────────────────────────────────
 
 model Worker {
-  id                  String   @id
-  name                String
-  phoneNumber         String   @unique @map("phone_number")
-  photoUrl            String?  @map("photo_url")
-  primarySkill        String   @map("primary_skill") // Loader | Driver | Unloader | General Labor | Welder
-  preferredRadiusKm   Float    @map("preferred_radius_km")
-  walletBalance       Int      @default(0) @map("wallet_balance")
-  totalEarned         Int      @default(0) @map("total_earned")
-  jobsCompleted       Int      @default(0) @map("jobs_completed")
-  reliabilityScore    Int      @default(100) @map("reliability_score")
-  averageRating       Float    @default(0) @map("average_rating")
-  creditScore         Int      @default(50) @map("credit_score")
-  joinedAt            DateTime @default(now()) @map("joined_at")
+  id                       String   @id
+  name                     String
+  phoneNumber              String   @unique @map("phone_number")
+  photoUrl                 String?  @map("photo_url")
+  primarySkill             String   @map("primary_skill")
+  preferredRadiusKm        Float    @map("preferred_radius_km")
+  walletBalance            Int      @default(0) @map("wallet_balance")
+  totalEarned              Int      @default(0) @map("total_earned")
+  jobsCompleted            Int      @default(0) @map("jobs_completed")
+  reliabilityScore         Int      @default(100) @map("reliability_score")
+  averageRating            Float    @default(0) @map("average_rating")
+  creditScore              Int      @default(50) @map("credit_score")
+  joinedAt                 DateTime @default(now()) @map("joined_at")
 
-  // Soft-delete window (18_settings.md `account/delete`)
-  deletionRequestId   String?  @map("deletion_request_id")
-  deletionScheduledAt DateTime? @map("deletion_scheduled_at")
-  deletionCompletesAt DateTime? @map("deletion_completes_at")
+  // Soft-delete window
+  deletionRequestId        String?  @map("deletion_request_id")
+  deletionScheduledAt      DateTime? @map("deletion_scheduled_at")
+  deletionCompletesAt      DateTime? @map("deletion_completes_at")
 
+  // Brief additions (employer/bank dashboards) — additive, defaults safe.
+  homeLat                  Float?   @map("home_lat")
+  homeLng                  Float?   @map("home_lng")
+  homeNeighborhood         String?  @map("home_neighborhood")
+  homeAddress              String?  @map("home_address")
+  onTimeRate               Float    @default(1) @map("on_time_rate")
+  incomeVolatilityPct      Float    @default(0) @map("income_volatility_pct")
+  averageWeeklyIncomeNaira Int      @default(0) @map("average_weekly_income_naira")
+  eligibility              String   @default("ineligible")
+  squadWalletId            String?  @unique @map("squad_wallet_id")
+  watchlistedAt            DateTime? @map("watchlisted_at")
+
+  // Existing relations
   refreshTokens   RefreshToken[]
   bankAccounts    BankAccount[]
   applications    JobApplication[]
@@ -47,14 +66,24 @@ model Worker {
   tickets         SupportTicket[]
   idempotency     IdempotencyRecord[]
 
+  // Brief additions
+  assignedJobs        Job[]                @relation("JobAssignedWorker")
+  clockEvents         ClockEvent[]
+  photoProofs         PhotoProof[]
+  reviews             Review[]
+  loanApplications    LoanApplication[]    @relation("WorkerLoanApplications")
+  blocklistedBy       EmployerBlock[]
+  teamMemberships     EmployerTeamMember[]
+
   @@map("workers")
 }
 
 model OtpChallenge {
   id             String   @id
   phone          String
-  flow           String   // login | signup | phone_change
-  ownerWorkerId  String?  @map("owner_worker_id") // set for phone_change
+  flow           String   // login | signup | phone_change | dashboard_login
+  ownerWorkerId  String?  @map("owner_worker_id")
+  ownerUserId    String?  @map("owner_user_id")
   codeHash       String   @map("code_hash")
   attempts       Int      @default(0)
   consumed       Boolean  @default(false)
@@ -80,26 +109,175 @@ model RefreshToken {
   @@map("refresh_tokens")
 }
 
-// ─── Jobs ───────────────────────────────────────────────────────────────────
+// ─── Dashboard identity (new) ───────────────────────────────────────────────
+
+model User {
+  id              String   @id
+  email           String   @unique
+  phone           String?  @unique
+  fullName        String   @map("full_name")
+  avatarUrl       String?  @map("avatar_url")
+  passwordHash    String?  @map("password_hash")
+  oauthProvider   String?  @map("oauth_provider")
+  role            String
+  employerId      String?  @map("employer_id")
+  bankId          String?  @map("bank_id")
+  emailVerifiedAt DateTime? @map("email_verified_at")
+  lastLoginAt     DateTime? @map("last_login_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  employer        Employer?           @relation(fields: [employerId], references: [id])
+  bank            Bank?               @relation(fields: [bankId], references: [id])
+  refreshTokens   UserRefreshToken[]
+  emailTokens     EmailToken[]
+  notifications   UserNotification[]
+  auditEvents     AuditEvent[]
+  invitedBy       TeamInvitation[]    @relation("InvitedByUser")
+
+  @@index([employerId])
+  @@index([bankId])
+  @@map("users")
+}
+
+model UserRefreshToken {
+  id         String   @id
+  userId     String   @map("user_id")
+  tokenHash  String   @unique @map("token_hash")
+  familyId   String   @map("family_id")
+  expiresAt  DateTime @map("expires_at")
+  usedAt     DateTime? @map("used_at")
+  revokedAt  DateTime? @map("revoked_at")
+  userAgent  String?  @map("user_agent")
+  ipAddress  String?  @map("ip_address")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("user_refresh_tokens")
+}
+
+model EmailToken {
+  id        String   @id
+  userId    String   @map("user_id")
+  purpose   String   // verify | reset
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  consumed  Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+  @@map("email_tokens")
+}
+
+// ─── Employer (business) ────────────────────────────────────────────────────
 
 model Employer {
-  id           String   @id
-  name         String
-  photoUrl     String?  @map("photo_url")
-  rating       Float    @default(0)
-  jobsPosted   Int      @default(0) @map("jobs_posted")
-  memberSince  DateTime @map("member_since")
-  phoneNumber  String?  @map("phone_number")
+  id                       String   @id
+  businessName             String   @map("business_name")
+  type                     String
+  registeredLat            Float    @map("registered_lat")
+  registeredLng            Float    @map("registered_lng")
+  registeredNeighborhood   String   @map("registered_neighborhood")
+  registeredAddress        String   @map("registered_address")
+  joinedAt                 DateTime @default(now()) @map("joined_at")
+  squadWalletId            String?  @unique @map("squad_wallet_id")
 
-  jobs Job[]
+  // Worker-mobile-facing fields. The mobile feed embeds an employer summary on each
+  // job; these power that view. Updated by the employer dashboard's settings endpoints.
+  photoUrl                 String?  @map("photo_url")
+  rating                   Float    @default(0)
+  phoneNumber              String?  @map("phone_number")
+
+  // Computed snapshots — refreshed by background job.
+  creditScore              Int      @default(50) @map("credit_score")
+  totalLaborSpendNaira     Int      @default(0) @map("total_labor_spend_naira")
+  workersHired             Int      @default(0) @map("workers_hired")
+  jobsPosted               Int      @default(0) @map("jobs_posted")
+  paymentTimelinessRate    Float    @default(1) @map("payment_timeliness_rate")
+  walletBalanceNaira       Int      @default(0) @map("wallet_balance_naira")
+
+  payoutsPaused            Boolean  @default(false) @map("payouts_paused")
+  invoicingEmail           String?  @map("invoicing_email")
+  plan                     String   @default("starter")
+  notifyOnNewApplication   Boolean  @default(true) @map("notify_on_new_application")
+  notifyOnClockEvents      Boolean  @default(true) @map("notify_on_clock_events")
+  notifyOnPaymentEvents    Boolean  @default(true) @map("notify_on_payment_events")
+
+  deletedAt                DateTime? @map("deleted_at")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  users            User[]
+  jobs             Job[]
+  transactions     Transaction[]        @relation("EmployerTransactions")
+  invoices         Invoice[]
+  payouts          Payout[]
+  loans            Loan[]               @relation("EmployerLoans")
+  loanApplications LoanApplication[]    @relation("BusinessLoanApplications")
+  reviews          Review[]
+  team             EmployerTeamMember[]
+  blocks           EmployerBlock[]
+  invitations      TeamInvitation[]
 
   @@map("employers")
 }
 
+model EmployerTeamMember {
+  id         String   @id
+  employerId String   @map("employer_id")
+  workerId   String   @map("worker_id")
+  addedAt    DateTime @default(now()) @map("added_at")
+
+  employer Employer @relation(fields: [employerId], references: [id], onDelete: Cascade)
+  worker   Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@unique([employerId, workerId])
+  @@map("employer_team_members")
+}
+
+model EmployerBlock {
+  id         String   @id
+  employerId String   @map("employer_id")
+  workerId   String   @map("worker_id")
+  reason     String?
+  blockedAt  DateTime @default(now()) @map("blocked_at")
+
+  employer Employer @relation(fields: [employerId], references: [id], onDelete: Cascade)
+  worker   Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@unique([employerId, workerId])
+  @@map("employer_blocks")
+}
+
+model TeamInvitation {
+  id           String   @id
+  employerId   String   @map("employer_id")
+  email        String
+  role         String
+  invitedById  String   @map("invited_by_id")
+  tokenHash    String   @unique @map("token_hash")
+  expiresAt    DateTime @map("expires_at")
+  acceptedAt   DateTime? @map("accepted_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  employer  Employer @relation(fields: [employerId], references: [id], onDelete: Cascade)
+  invitedBy User     @relation("InvitedByUser", fields: [invitedById], references: [id])
+
+  @@index([employerId])
+  @@map("team_invitations")
+}
+
+// ─── Jobs (existing, expanded) ──────────────────────────────────────────────
+
 model Job {
   id                    String   @id
   employerId            String   @map("employer_id")
-  type                  String   // loader | driver | unloader | general_labor | welder
+  type                  String
   title                 String
   description           String
   payAmount             Int      @map("pay_amount")
@@ -107,31 +285,48 @@ model Job {
   lat                   Float
   lng                   Float
   address               String
+  neighborhood          String?
   geofenceRadiusMeters  Int      @default(200) @map("geofence_radius_meters")
   startTime             DateTime @map("start_time")
+  startedAt             DateTime? @map("started_at")
+  completedAt           DateTime? @map("completed_at")
   requiredEquipment     String[] @map("required_equipment")
   applicantsCount       Int      @default(0) @map("applicants_count")
   filled                Boolean  @default(false)
+  status                String   @default("open")
+  audience              String   @default("public")
+  audienceFlippedAt     DateTime? @map("audience_flipped_at")
+  assignedWorkerId      String?  @map("assigned_worker_id")
+  cancelledReason       String?  @map("cancelled_reason")
+  deletedAt             DateTime? @map("deleted_at")
   createdAt             DateTime @default(now()) @map("created_at")
 
-  employer     Employer         @relation(fields: [employerId], references: [id])
-  applications JobApplication[]
+  employer       Employer         @relation(fields: [employerId], references: [id])
+  assignedWorker Worker?          @relation("JobAssignedWorker", fields: [assignedWorkerId], references: [id])
+  applications   JobApplication[]
+  events         JobEvent[]
+  clockEvents    ClockEvent[]
+  photoProofs    PhotoProof[]
+  reviews        Review[]
 
   @@index([type])
   @@index([startTime])
+  @@index([employerId, status])
+  @@index([status])
   @@map("jobs")
 }
 
 model JobApplication {
-  id           String    @id
-  workerId     String    @map("worker_id")
-  jobId        String    @map("job_id")
-  status       String    // applied | accepted | rejected | in_progress | completed | withdrawn
-  appliedAt    DateTime  @default(now()) @map("applied_at")
-  decidedAt    DateTime? @map("decided_at")
-  completedAt  DateTime? @map("completed_at")
-  withdrawnAt  DateTime? @map("withdrawn_at")
-  note         String?
+  id              String    @id
+  workerId        String    @map("worker_id")
+  jobId           String    @map("job_id")
+  status          String
+  appliedAt       DateTime  @default(now()) @map("applied_at")
+  decidedAt       DateTime? @map("decided_at")
+  completedAt     DateTime? @map("completed_at")
+  withdrawnAt     DateTime? @map("withdrawn_at")
+  note            String?
+  distanceMeters  Int?      @map("distance_meters")
 
   worker  Worker       @relation(fields: [workerId], references: [id], onDelete: Cascade)
   job     Job          @relation(fields: [jobId], references: [id])
@@ -139,13 +334,30 @@ model JobApplication {
 
   @@unique([workerId, jobId])
   @@index([workerId, status])
+  @@index([jobId, status])
   @@map("job_applications")
+}
+
+model JobEvent {
+  id          String   @id
+  jobId       String   @map("job_id")
+  kind        String
+  actorId     String   @map("actor_id")
+  actorType   String   @map("actor_type")
+  payload     Json     @default("{}")
+  occurredAt  DateTime @default(now()) @map("occurred_at")
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, occurredAt(sort: Desc)])
+  @@index([kind])
+  @@map("job_events")
 }
 
 model WorkSession {
   id                     String    @id
   applicationId          String    @unique @map("application_id")
-  status                 String    // in_progress | submitting | completed | payment_pending
+  status                 String
   clockInAt              DateTime  @map("clock_in_at")
   clockInLat             Float     @map("clock_in_lat")
   clockInLng             Float     @map("clock_in_lng")
@@ -165,11 +377,88 @@ model WorkSession {
   @@map("work_sessions")
 }
 
-// ─── Wallet ─────────────────────────────────────────────────────────────────
+model ClockEvent {
+  id                String   @id
+  jobId             String   @map("job_id")
+  workerId          String   @map("worker_id")
+  kind              String
+  at                DateTime
+  gpsLat            Float    @map("gps_lat")
+  gpsLng            Float    @map("gps_lng")
+  gpsAccuracyMeters Float    @map("gps_accuracy_meters")
+  verified          Boolean
 
-model Bank {
+  job    Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, at])
+  @@index([workerId, at(sort: Desc)])
+  @@map("clock_events")
+}
+
+model PhotoProof {
+  id          String   @id
+  jobId       String   @map("job_id")
+  workerId    String   @map("worker_id")
+  at          DateTime
+  s3Key       String   @map("s3_key")
+  exifLat     Float?   @map("exif_lat")
+  exifLng     Float?   @map("exif_lng")
+  exifTakenAt DateTime? @map("exif_taken_at")
+
+  job    Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@map("photo_proofs")
+}
+
+model Review {
+  id         String   @id
+  jobId      String   @map("job_id")
+  workerId   String   @map("worker_id")
+  employerId String   @map("employer_id")
+  rating     Int
+  body       String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  job      Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  worker   Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  employer Employer @relation(fields: [employerId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, workerId])
+  @@index([workerId])
+  @@map("reviews")
+}
+
+// ─── Wallet / payments ──────────────────────────────────────────────────────
+
+// Renamed from `Bank` to free the name for the lender entity below.
+// Existing `BanksService` updated to use prisma.nibssBank.*.
+model NibssBank {
   code String @id
   name String
+
+  @@map("nibss_banks")
+}
+
+// Lending bank (per BACKEND_BRIEF §4).
+model Bank {
+  id           String   @id
+  name         String
+  primaryColor String   @map("primary_color")
+
+  totalActiveLoans     Int   @default(0) @map("total_active_loans")
+  totalDisbursedNaira  Int   @default(0) @map("total_disbursed_naira")
+  repaymentRate        Float @default(0) @map("repayment_rate")
+  defaultRate          Float @default(0) @map("default_rate")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users            User[]
+  loans            Loan[]
+  loanApplications LoanApplication[]
 
   @@map("banks")
 }
@@ -194,60 +483,141 @@ model BankAccount {
 model Transaction {
   id              String   @id
   workerId        String   @map("worker_id")
-  kind            String   // job_payment | loan_disbursement | loan_repayment | withdrawal
-  amount          Int      // signed; + credit, − debit
+  employerId      String?  @map("employer_id")
+  kind            String
+  amount          Int
   timestamp       DateTime
   title           String
   subtitle        String
-  squadReference  String?  @map("squad_reference")
+  squadReference  String?  @unique @map("squad_reference")
   relatedJobId    String?  @map("related_job_id")
   bankAccountId   String?  @map("bank_account_id")
-  status          String   @default("succeeded") // pending | succeeded | failed
+  status          String   @default("succeeded")
+  failureReason   String?  @map("failure_reason")
+  settledAt       DateTime? @map("settled_at")
   createdAt       DateTime @default(now()) @map("created_at")
 
-  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  worker   Worker    @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  employer Employer? @relation("EmployerTransactions", fields: [employerId], references: [id])
 
   @@index([workerId, timestamp(sort: Desc)])
+  @@index([employerId, timestamp(sort: Desc)])
+  @@index([status])
   @@map("transactions")
+}
+
+model Invoice {
+  id             String   @id
+  employerId     String   @map("employer_id")
+  number         String   @unique
+  lineItems      Json     @map("line_items")
+  subtotalNaira  Int      @map("subtotal_naira")
+  totalNaira     Int      @map("total_naira")
+  status         String   @default("draft")
+  pdfS3Key       String?  @map("pdf_s3_key")
+  issuedAt       DateTime @default(now()) @map("issued_at")
+  dueAt          DateTime? @map("due_at")
+  paidAt         DateTime? @map("paid_at")
+
+  employer Employer @relation(fields: [employerId], references: [id], onDelete: Cascade)
+
+  @@index([employerId, issuedAt(sort: Desc)])
+  @@map("invoices")
+}
+
+model Payout {
+  id            String   @id
+  employerId    String   @map("employer_id")
+  scheduledFor  DateTime @map("scheduled_for")
+  amountNaira   Int      @map("amount_naira")
+  status        String   @default("scheduled")
+  description   String
+  failedReason  String?  @map("failed_reason")
+  paidAt        DateTime? @map("paid_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  employer Employer @relation(fields: [employerId], references: [id], onDelete: Cascade)
+
+  @@index([employerId, scheduledFor])
+  @@map("payouts")
 }
 
 // ─── Loans ──────────────────────────────────────────────────────────────────
 
 model Loan {
   id                       String    @id
-  workerId                 String    @map("worker_id")
+  workerId                 String?   @map("worker_id")
+  employerId               String?   @map("employer_id")
+  bankId                   String?   @map("bank_id")
+  borrowerType             String    @default("worker") @map("borrower_type")
   principal                Int
   outstandingBalance       Int       @map("outstanding_balance")
   interestRatePercent      Float     @map("interest_rate_percent")
+  apr                      Float     @default(0)
+  termMonths               Int?      @map("term_months")
   repaymentPercentPerJob   Float     @map("repayment_percent_per_job")
-  status                   String    // pending | approved | rejected | active | repaid
+  status                   String
+  riskLevel                String    @default("green") @map("risk_level")
   purpose                  String?
   disbursedAt              DateTime? @map("disbursed_at")
   estimatedDecisionAt      DateTime? @map("estimated_decision_at")
   expectedFullRepaymentAt  DateTime? @map("expected_full_repayment_at")
+  nextPaymentDueAt         DateTime? @map("next_payment_due_at")
+  scoreAtApproval          Int?      @map("score_at_approval")
+  predictedRepaymentRate   Float?    @map("predicted_repayment_rate")
   rejectionReason          String?   @map("rejection_reason")
   createdAt                DateTime  @default(now()) @map("created_at")
 
-  worker     Worker          @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  worker     Worker?         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  employer   Employer?       @relation("EmployerLoans", fields: [employerId], references: [id], onDelete: Cascade)
+  bank       Bank?           @relation(fields: [bankId], references: [id])
   repayments LoanRepayment[]
 
   @@index([workerId, status])
+  @@index([employerId, status])
+  @@index([bankId, status])
+  @@index([riskLevel])
   @@map("loans")
 }
 
 model LoanRepayment {
-  id            String   @id
-  loanId        String   @map("loan_id")
+  id            String    @id
+  loanId        String    @map("loan_id")
   amount        Int
-  paidAt        DateTime @map("paid_at")
-  fromJobId     String   @map("from_job_id")
-  fromJobTitle  String   @map("from_job_title")
-  transactionId String   @map("transaction_id")
+  paidAt        DateTime? @map("paid_at")
+  scheduledFor  DateTime? @map("scheduled_for")
+  fromJobId     String?   @map("from_job_id")
+  fromJobTitle  String?   @map("from_job_title")
+  transactionId String?   @map("transaction_id")
+  status        String    @default("paid")
 
   loan Loan @relation(fields: [loanId], references: [id], onDelete: Cascade)
 
-  @@index([loanId, paidAt(sort: Desc)])
+  @@index([loanId, scheduledFor])
   @@map("loan_repayments")
+}
+
+model LoanApplication {
+  id                          String   @id
+  borrowerType                String   @map("borrower_type")
+  workerId                    String?  @map("worker_id")
+  employerId                  String?  @map("employer_id")
+  bankId                      String   @map("bank_id")
+  amountRequestedNaira        Int      @map("amount_requested_naira")
+  termMonths                  Int      @map("term_months")
+  appliedAt                   DateTime @default(now()) @map("applied_at")
+  recommendedDecision         String   @map("recommended_decision")
+  recommendationConfidencePct Int      @map("recommendation_confidence_pct")
+  recommendationReason        String   @map("recommendation_reason")
+  status                      String   @default("pending")
+  decidedAt                   DateTime? @map("decided_at")
+
+  worker   Worker?   @relation("WorkerLoanApplications", fields: [workerId], references: [id], onDelete: Cascade)
+  employer Employer? @relation("BusinessLoanApplications", fields: [employerId], references: [id], onDelete: Cascade)
+  bank     Bank      @relation(fields: [bankId], references: [id])
+
+  @@index([bankId, status])
+  @@map("loan_applications")
 }
 
 // ─── Profile / Settings ─────────────────────────────────────────────────────
@@ -269,7 +639,7 @@ model DeviceToken {
   id          String   @id
   workerId    String   @map("worker_id")
   deviceId    String   @map("device_id")
-  platform    String   // ios | android
+  platform    String
   pushToken   String   @map("push_token")
   appVersion  String?  @map("app_version")
   updatedAt   DateTime @updatedAt @map("updated_at")
@@ -284,7 +654,7 @@ model DeviceToken {
 model Notification {
   id        String   @id
   workerId  String   @map("worker_id")
-  kind      String   // new_job | application_update | payment | loan | system
+  kind      String
   title     String
   body      String
   timestamp DateTime
@@ -297,11 +667,29 @@ model Notification {
   @@map("notifications")
 }
 
+// Notifications for dashboard users (employer + bank).
+model UserNotification {
+  id              String    @id
+  recipientUserId String    @map("recipient_user_id")
+  kind            String
+  title           String
+  detail          String
+  href            String?
+  occurredAt      DateTime  @default(now()) @map("occurred_at")
+  readAt          DateTime? @map("read_at")
+
+  recipient User @relation(fields: [recipientUserId], references: [id], onDelete: Cascade)
+
+  @@index([recipientUserId, occurredAt(sort: Desc)])
+  @@index([recipientUserId, readAt])
+  @@map("user_notifications")
+}
+
 // ─── Support ────────────────────────────────────────────────────────────────
 
 model HelpArticle {
   id            String   @id
-  category      String   // getting_started | payments | loans | account
+  category      String
   title         String
   bodyMarkdown  String   @map("body_markdown")
   updatedAt     DateTime @updatedAt @map("updated_at")
@@ -331,7 +719,7 @@ model SupportTicket {
 model Upload {
   id         String   @id
   workerId   String   @map("worker_id")
-  purpose    String   // worker_avatar | clock_out_proof
+  purpose    String
   filePath   String   @map("file_path")
   mimeType   String   @map("mime_type")
   sizeBytes  Int      @map("size_bytes")
@@ -350,17 +738,55 @@ model Upload {
 
 model IdempotencyRecord {
   key            String   @id
-  workerId       String   @map("worker_id")
+  workerId       String?  @map("worker_id")
+  userId         String?  @map("user_id")
   method         String
   path           String
   requestHash    String   @map("request_hash")
   responseStatus Int      @map("response_status")
-  responseBody   String   @map("response_body") // serialized JSON
+  responseBody   String   @map("response_body")
   expiresAt      DateTime @map("expires_at")
   createdAt      DateTime @default(now()) @map("created_at")
 
-  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  worker Worker? @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
   @@index([expiresAt])
+  @@index([userId])
   @@map("idempotency_records")
+}
+
+// Audit log — append-only.
+model AuditEvent {
+  id            String   @id
+  actorUserId   String?  @map("actor_user_id")
+  actorWorkerId String?  @map("actor_worker_id")
+  actorType     String   @map("actor_type")
+  action        String
+  entityType    String   @map("entity_type")
+  entityId      String   @map("entity_id")
+  before        Json?
+  after         Json?
+  ipAddress     String?  @map("ip_address")
+  userAgent     String?  @map("user_agent")
+  occurredAt    DateTime @default(now()) @map("occurred_at")
+
+  user User? @relation(fields: [actorUserId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([occurredAt(sort: Desc)])
+  @@map("audit_events")
+}
+
+// BullMQ run log.
+model JobRun {
+  id          String    @id
+  name        String
+  startedAt   DateTime  @default(now()) @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  status      String
+  error       String?
+  payload     Json?
+
+  @@index([name, startedAt(sort: Desc)])
+  @@map("job_runs")
 }

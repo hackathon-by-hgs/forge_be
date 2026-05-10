@@ -9,6 +9,28 @@ export const appConfig = () => ({
     refreshSecret: process.env.JWT_REFRESH_SECRET ?? 'dev-refresh-secret',
     accessTtlSeconds: parseInt(process.env.JWT_ACCESS_TTL ?? '900', 10),
     refreshTtlSeconds: parseInt(process.env.JWT_REFRESH_TTL ?? '2592000', 10),
+    // Dashboard (web) users: separate secret pair so a compromised mobile secret
+    // cannot mint dashboard tokens and vice versa.
+    userAccessSecret: process.env.USER_JWT_ACCESS_SECRET ?? process.env.JWT_ACCESS_SECRET ?? 'dev-user-access-secret',
+    userRefreshSecret: process.env.USER_JWT_REFRESH_SECRET ?? process.env.JWT_REFRESH_SECRET ?? 'dev-user-refresh-secret',
+    userAccessTtlSeconds: parseInt(process.env.USER_JWT_ACCESS_TTL ?? '900', 10),
+    userRefreshTtlSeconds: parseInt(process.env.USER_JWT_REFRESH_TTL ?? '2592000', 10),
+  },
+
+  cookies: {
+    // Cookie domain: `.forge.app` in prod so employer.forge.app + bank.forge.app share the session.
+    // Leave undefined in dev so the cookie attaches to localhost.
+    domain: process.env.COOKIE_DOMAIN || undefined,
+    secure: (process.env.COOKIE_SECURE ?? (process.env.NODE_ENV === 'production' ? 'true' : 'false')) === 'true',
+    sameSite: (process.env.COOKIE_SAMESITE ?? 'lax') as 'lax' | 'strict' | 'none',
+    refreshName: 'forge_rt',
+  },
+
+  email: {
+    from: process.env.EMAIL_FROM ?? 'no-reply@forge.app',
+    // Resend / Postmark API key — log to console if unset (dev mode).
+    apiKey: process.env.EMAIL_API_KEY ?? null,
+    appBaseUrl: process.env.APP_BASE_URL ?? 'http://localhost:3000',
   },
 
   otp: {

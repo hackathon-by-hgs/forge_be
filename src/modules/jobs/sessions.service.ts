@@ -153,7 +153,7 @@ export class SessionsService {
           kind: 'job_payment',
           amount: s.payAmountPending,
           timestamp: clockOutAt,
-          title: employer?.name ?? 'Job payment',
+          title: employer?.businessName ?? 'Job payment',
           subtitle: `${s.application.job.type} · ${s.application.job.address}`,
           relatedJobId: s.application.jobId,
           squadReference: 'sqd_' + transactionId.slice(4),

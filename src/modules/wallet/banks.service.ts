@@ -13,7 +13,7 @@ export class BanksService {
   constructor(private readonly prisma: PrismaService) {}
 
   async listBanks() {
-    const items = await this.prisma.bank.findMany({ orderBy: { name: 'asc' } });
+    const items = await this.prisma.nibssBank.findMany({ orderBy: { name: 'asc' } });
     return { items };
   }
 
@@ -24,7 +24,7 @@ export class BanksService {
    */
   async resolve(workerId: string, body: ResolveBankDto) {
     void workerId;
-    const bank = await this.prisma.bank.findUnique({ where: { code: body.bank_code } });
+    const bank = await this.prisma.nibssBank.findUnique({ where: { code: body.bank_code } });
     if (!bank) {
       throw new AppError(400, 'VALIDATION_FAILED', 'Unknown bank code.');
     }
@@ -51,7 +51,7 @@ export class BanksService {
   }
 
   async link(workerId: string, body: LinkBankAccountDto): Promise<BankAccountDto> {
-    const bank = await this.prisma.bank.findUnique({ where: { code: body.bank_code } });
+    const bank = await this.prisma.nibssBank.findUnique({ where: { code: body.bank_code } });
     if (!bank) {
       throw new AppError(400, 'VALIDATION_FAILED', 'Unknown bank code.');
     }

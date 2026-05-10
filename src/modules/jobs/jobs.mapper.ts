@@ -19,18 +19,18 @@ export interface JobWithEmployer extends Job {
 function toEmployerDto(e: Employer): EmployerDto {
   return {
     id: e.id,
-    name: e.name,
+    name: e.businessName,
     photo_url: e.photoUrl,
     rating: e.rating,
     jobs_posted: e.jobsPosted,
-    member_since: e.memberSince.toISOString(),
+    member_since: e.joinedAt.toISOString(),
   };
 }
 
 export function toEmployerSlimDto(e: Employer): EmployerSlimDto {
   return {
     id: e.id,
-    name: e.name,
+    name: e.businessName,
     photo_url: e.photoUrl,
   };
 }

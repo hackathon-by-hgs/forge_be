@@ -24,9 +24,9 @@ export function toRepaymentDto(r: LoanRepayment) {
   return {
     id: r.id,
     amount: r.amount,
-    paid_at: r.paidAt.toISOString(),
-    from_job_id: r.fromJobId,
-    from_job_title: r.fromJobTitle,
-    transaction_id: r.transactionId,
+    paid_at: (r.paidAt ?? r.scheduledFor ?? new Date(0)).toISOString(),
+    from_job_id: r.fromJobId ?? '',
+    from_job_title: r.fromJobTitle ?? '',
+    transaction_id: r.transactionId ?? '',
   };
 }
