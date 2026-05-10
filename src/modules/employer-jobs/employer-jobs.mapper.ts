@@ -49,6 +49,13 @@ export function mapApplicationStatusToDashboard(dbStatus: string): string {
 
 // ── Job ───────────────────────────────────────────────────────────────────────
 
+export interface DashboardAssignedWorker {
+  id: string;
+  fullName: string;
+  photoUrl: string | null;
+  primarySkill: DashboardJobTypeEnum;
+}
+
 export interface DashboardJob {
   id: string;
   employerId: string;
@@ -73,11 +80,19 @@ export interface DashboardJob {
   completedAt: string | null;
   applicationsCount: number;
   assignedWorkerId: string | null;
+  assignedWorker: DashboardAssignedWorker | null;
   cancelledReason: string | null;
   requiredEquipment: string[];
 }
 
-export function toDashboardJob(j: Job): DashboardJob {
+/**
+ * Accepts an optional `Worker` so callers that include the relation get the
+ * hydrated summary, and callers reading scalars-only (CSV export, lightweight
+ * lists) skip the join cost. When `assignedWorkerId` is set but no worker is
+ * passed, the field stays `null` — the FE treats that the same as "not yet
+ * loaded" and avoids rendering raw IDs.
+ */
+export function toDashboardJob(j: Job, assignedWorker?: Worker | null): DashboardJob {
   return {
     id: j.id,
     employerId: j.employerId,
@@ -102,6 +117,14 @@ export function toDashboardJob(j: Job): DashboardJob {
     completedAt: j.completedAt ? j.completedAt.toISOString() : null,
     applicationsCount: j.applicantsCount,
     assignedWorkerId: j.assignedWorkerId ?? null,
+    assignedWorker: assignedWorker
+      ? {
+          id: assignedWorker.id,
+          fullName: assignedWorker.name,
+          photoUrl: assignedWorker.photoUrl ?? null,
+          primarySkill: mapWorkerSkillToDashboard(assignedWorker.primarySkill),
+        }
+      : null,
     cancelledReason: j.cancelledReason ?? null,
     requiredEquipment: j.requiredEquipment,
   };

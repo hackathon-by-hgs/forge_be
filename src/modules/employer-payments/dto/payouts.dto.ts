@@ -39,6 +39,9 @@ export class PayoutDto {
 export class PayoutsUpcomingResponseDto {
   @ApiProperty({ type: [PayoutDto], description: 'Status in `scheduled` or `processing`, ordered `scheduledFor asc`.' })
   data!: PayoutDto[];
+
+  @ApiProperty({ example: false, description: '`Employer.payoutsPaused` mirrored here so the dashboard can pick "Pause" vs "Resume" without a separate `/settings/squad` round-trip.' })
+  paused!: boolean;
 }
 
 export class PayoutsHistoryQueryDto {

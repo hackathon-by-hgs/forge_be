@@ -38,6 +38,25 @@ export class JobLocationDto {
   neighborhood?: string | null;
 }
 
+/**
+ * Hydrated summary of the worker assigned to a job. Embedded on `JobDto` so
+ * the dashboard kanban / detail screens can render name + avatar without an
+ * extra `/employer/workers/:id` round-trip per row. Null until acceptance.
+ */
+export class AssignedWorkerSummaryDto {
+  @ApiProperty({ example: 'wkr_0042' })
+  id!: string;
+
+  @ApiProperty({ example: 'Tunde Adeyemi' })
+  fullName!: string;
+
+  @ApiPropertyOptional({ nullable: true, example: 'https://cdn.forge.app/workers/wkr_0042.jpg' })
+  photoUrl!: string | null;
+
+  @ApiProperty({ enum: DashboardJobTypeEnum, example: DashboardJobTypeEnum.Loader })
+  primarySkill!: DashboardJobTypeEnum;
+}
+
 export class JobDto {
   @ApiProperty({ example: 'job_00123' })
   id!: string;
@@ -92,6 +111,9 @@ export class JobDto {
 
   @ApiPropertyOptional({ nullable: true, example: 'wkr_0042' })
   assignedWorkerId?: string | null;
+
+  @ApiPropertyOptional({ nullable: true, type: () => AssignedWorkerSummaryDto, description: 'Hydrated worker summary. Null until acceptance.' })
+  assignedWorker!: AssignedWorkerSummaryDto | null;
 
   @ApiPropertyOptional({ nullable: true })
   cancelledReason?: string | null;

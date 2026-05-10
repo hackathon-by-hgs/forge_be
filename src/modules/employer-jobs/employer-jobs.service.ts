@@ -94,6 +94,7 @@ export class EmployerJobsService {
     const [rows, total] = await Promise.all([
       this.prisma.job.findMany({
         where,
+        include: { assignedWorker: true },
         orderBy: [{ [sortField]: sortDir }, { id: sortDir }],
         skip: (page - 1) * pageSize,
         take: pageSize,
@@ -101,7 +102,12 @@ export class EmployerJobsService {
       this.prisma.job.count({ where }),
     ]);
 
-    return paginate<JobDto>(rows.map(toDashboardJob) as JobDto[], total, page, pageSize);
+    return paginate<JobDto>(
+      rows.map((j) => toDashboardJob(j, j.assignedWorker)) as JobDto[],
+      total,
+      page,
+      pageSize,
+    );
   }
 
   // ── Active convenience (no pagination — Kanban renders all) ──────────────
@@ -109,9 +115,10 @@ export class EmployerJobsService {
     const eid = this.requireScope(employerId);
     const rows = await this.prisma.job.findMany({
       where: { employerId: eid, deletedAt: null, status: { in: ACTIVE_STATUSES } },
+      include: { assignedWorker: true },
       orderBy: [{ startTime: 'asc' }, { id: 'asc' }],
     });
-    return { data: rows.map(toDashboardJob) as JobDto[] };
+    return { data: rows.map((j) => toDashboardJob(j, j.assignedWorker)) as JobDto[] };
   }
 
   // ── Recent templates (top 3 most-recent posted-or-completed jobs) ────────
@@ -140,9 +147,10 @@ export class EmployerJobsService {
     const eid = this.requireScope(employerId);
     const job = await this.prisma.job.findFirst({
       where: { id: jobId, employerId: eid, deletedAt: null },
+      include: { assignedWorker: true },
     });
     if (!job) throw new AppError(404, 'NOT_FOUND', 'Job not found.');
-    return toDashboardJob(job) as JobDto;
+    return toDashboardJob(job, job.assignedWorker) as JobDto;
   }
 
   // ── Timeline ─────────────────────────────────────────────────────────────
@@ -273,6 +281,7 @@ export class EmployerJobsService {
           audience: body.audience,
           audienceFlippedAt: body.audience === JobAudience.TeamFirst ? null : new Date(),
         },
+        include: { assignedWorker: true },
       });
       await tx.jobEvent.create({
         data: {
@@ -300,7 +309,7 @@ export class EmployerJobsService {
       request: req,
     });
 
-    return toDashboardJob(created) as JobDto;
+    return toDashboardJob(created, created.assignedWorker) as JobDto;
   }
 
   // ── Update (only in draft|open) ──────────────────────────────────────────
@@ -336,7 +345,11 @@ export class EmployerJobsService {
     if (body.scheduledStartAt !== undefined) data.startTime = new Date(body.scheduledStartAt);
     if (body.requiredEquipment !== undefined) data.requiredEquipment = body.requiredEquipment;
 
-    const updated = await this.prisma.job.update({ where: { id: jobId }, data });
+    const updated = await this.prisma.job.update({
+      where: { id: jobId },
+      data,
+      include: { assignedWorker: true },
+    });
 
     await this.audit.record({
       actor: { type: 'user', id: actor.userId },
@@ -348,7 +361,7 @@ export class EmployerJobsService {
       request: req,
     });
 
-    return toDashboardJob(updated) as JobDto;
+    return toDashboardJob(updated, updated.assignedWorker) as JobDto;
   }
 
   // ── Publish (draft → open) ───────────────────────────────────────────────
@@ -370,6 +383,7 @@ export class EmployerJobsService {
       const j = await tx.job.update({
         where: { id: jobId },
         data: { status: 'open', audienceFlippedAt: before.audience === 'team_first' ? null : new Date() },
+        include: { assignedWorker: true },
       });
       await tx.jobEvent.create({
         data: {
@@ -394,7 +408,7 @@ export class EmployerJobsService {
       request: req,
     });
 
-    return toDashboardJob(updated) as JobDto;
+    return toDashboardJob(updated, updated.assignedWorker) as JobDto;
   }
 
   // ── Cancel (draft|open|applications_in|accepted) ─────────────────────────
@@ -421,6 +435,7 @@ export class EmployerJobsService {
           status: 'cancelled',
           cancelledReason: body.reason ?? null,
         },
+        include: { assignedWorker: true },
       });
       // Auto-reject any pending applications.
       await tx.jobApplication.updateMany({
@@ -466,7 +481,7 @@ export class EmployerJobsService {
       request: req,
     });
 
-    return toDashboardJob(updated) as JobDto;
+    return toDashboardJob(updated, updated.assignedWorker) as JobDto;
   }
 
   // ── Accept application (atomic auto-reject siblings) ─────────────────────
