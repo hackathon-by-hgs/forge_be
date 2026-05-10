@@ -45,7 +45,16 @@ export class AuthController {
 
   @Post('otp/request')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Request an SMS OTP for login or signup.' })
+  @ApiOperation({
+    summary: 'Request an SMS OTP for login or signup.',
+    description: [
+      '**Audience:** Worker mobile app (Flutter).',
+      '**Powers:** "Enter phone number" screen on first launch and re-login.',
+      '**Behavior:** Sends OTP via Termii. Rate-limited to 5/15min per phone (BACKEND_BRIEF §6).',
+      'Returns a `challenge_id` the client passes back to `/auth/otp/verify`.',
+      'In dev with `OTP_DEBUG_EXPOSE=true`, also retrievable via `/auth/otp/debug/{challengeId}`.',
+    ].join('\n\n'),
+  })
   @ApiBody({ type: RequestOtpDto })
   @ApiResponse({ status: 200, type: RequestOtpResponseDto })
   @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'VALIDATION_FAILED' })
@@ -58,7 +67,15 @@ export class AuthController {
 
   @Post('otp/verify')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Exchange a challenge + code for a token pair.' })
+  @ApiOperation({
+    summary: 'Exchange a challenge + code for a token pair.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** "Enter 6-digit code" screen.',
+      '**Behavior:** On success returns access + refresh tokens (worker scope, `bearer` scheme). ',
+      'For first-time signups, the response also flags `requires_profile_setup=true` so the app routes to `/auth/profile-setup`.',
+    ].join('\n\n'),
+  })
   @ApiBody({ type: VerifyOtpDto })
   @ApiResponse({ status: 200, type: VerifyOtpResponseDto })
   @ApiResponse({ status: 404, type: ErrorResponseDto, description: 'CHALLENGE_NOT_FOUND' })
@@ -73,7 +90,15 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth('bearer')
   @ApiIdempotencyKey()
-  @ApiOperation({ summary: 'Complete signup by setting name, skill, photo, and radius.' })
+  @ApiOperation({
+    summary: 'Complete signup by setting name, skill, photo, and radius.',
+    description: [
+      '**Audience:** Worker mobile app — first-launch onboarding only.',
+      '**Powers:** "Set up your profile" wizard (name → primary skill → photo upload → preferred radius).',
+      '**Behavior:** Idempotent on `Idempotency-Key`. The photo `upload_id` must come from a prior `POST /uploads` ',
+      'with `purpose=profile_photo`. Once set up, this endpoint 409s on retry.',
+    ].join('\n\n'),
+  })
   @ApiBody({ type: ProfileSetupDto })
   @ApiResponse({ status: 200, type: ProfileSetupResponseDto })
   @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'ALREADY_SET_UP' })
@@ -92,7 +117,16 @@ export class AuthController {
 
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Exchange a refresh token for a new pair (single-use).' })
+  @ApiOperation({
+    summary: 'Exchange a refresh token for a new pair (single-use).',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Silent token refresh in the mobile app HTTP layer (called on 401).',
+      '**Behavior:** Refresh tokens are body-based (not cookie) for the mobile audience. ',
+      'Reuse-detection: presenting the same refresh token twice invalidates the entire token family.',
+      'For the dashboard-side (cookie) refresh, see `POST /dashboard/auth/refresh`.',
+    ].join('\n\n'),
+  })
   @ApiBody({ type: RefreshDto })
   @ApiResponse({ status: 200, type: TokenPairDto })
   @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'TOKEN_INVALID | TOKEN_EXPIRED' })
@@ -104,7 +138,14 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth('bearer')
-  @ApiOperation({ summary: 'Invalidate the current refresh token. Best-effort.' })
+  @ApiOperation({
+    summary: 'Invalidate the current refresh token. Best-effort.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** "Sign out" in worker app Settings.',
+      '**Behavior:** Best-effort — succeeds even if the token is already invalid (returns 204 either way).',
+    ].join('\n\n'),
+  })
   @ApiBody({ type: RefreshDto })
   @ApiResponse({ status: 204 })
   async logout(@Body() body: RefreshDto) {
@@ -114,6 +155,11 @@ export class AuthController {
   @Get('otp/debug/:challengeId')
   @ApiOperation({
     summary: 'Dev/staging only — returns the OTP for a challenge. Disabled in prod.',
+    description: [
+      '**Audience:** Internal — devs and QA only.',
+      '**Powers:** Local mobile testing without an SMS gateway.',
+      '**Behavior:** Active only when `OTP_DEBUG_EXPOSE=true`. Always disabled in production.',
+    ].join('\n\n'),
   })
   @ApiResponse({ status: 200, schema: { type: 'object', properties: { hint: { type: 'string' } } } })
   debug(@Param('challengeId') id: string) {

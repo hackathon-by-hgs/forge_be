@@ -38,8 +38,11 @@ export class ApplicationsController {
   @Get()
   @ApiOperation({
     summary: 'List my applications, bucketed `active` or `history`.',
-    description:
-      '`active` = applied | accepted | in_progress; `history` = completed | rejected | withdrawn.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** "My Jobs" tab — Active and History segmented control.',
+      '**Buckets:** `active` = applied | accepted | in_progress; `history` = completed | rejected | withdrawn.',
+    ].join('\n\n'),
   })
   @ApiResponse({ status: 200, type: ApplicationsListResponseDto })
   list(@CurrentWorker() me: AuthedWorker, @Query() q: ApplicationsListQueryDto) {
@@ -47,7 +50,15 @@ export class ApplicationsController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Single application with full job + session.' })
+  @ApiOperation({
+    summary: 'Single application with full job + session.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Application detail screen reached from the "My Jobs" list. ',
+      'Returns the full job, the application status, and the related work session if one exists ',
+      '(used to deep-link into clock-in/clock-out flows).',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 200, type: ApplicationDetailDto })
   @ApiResponse({ status: 404, type: ErrorResponseDto })
   detail(@CurrentWorker() me: AuthedWorker, @Param('id') id: string) {
@@ -56,7 +67,14 @@ export class ApplicationsController {
 
   @Post(':id/withdraw')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Withdraw an application (only valid while status is `applied`).' })
+  @ApiOperation({
+    summary: 'Withdraw an application (only valid while status is `applied`).',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** "Withdraw application" CTA on the application detail screen. ',
+      'Only allowed before the employer accepts; once accepted the worker must contact the employer directly.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 200, type: WithdrawApplicationResponseDto })
   @ApiResponse({ status: 404, type: ErrorResponseDto })
   @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'INVALID_STATE' })

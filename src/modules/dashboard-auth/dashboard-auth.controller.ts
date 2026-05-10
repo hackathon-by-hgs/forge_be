@@ -44,7 +44,19 @@ export class DashboardAuthController {
 
   @Post('email/register')
   @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({ summary: 'Email + password signup. Sets refresh cookie, returns access token.' })
+  @ApiOperation({
+    summary: 'Email + password signup. Sets refresh cookie, returns access token.',
+    description: [
+      '**Audience:** Employer-web + bank-web dashboards (`bearer-user` JWT scheme).',
+      '**Powers:** `/signup` page on either dashboard.',
+      '',
+      '**⚠ Open product gap (HANDOFF.md "Open product question"):** self-signup with `role: bank_credit_officer` ',
+      'or `role: business_owner` currently produces an orphan user with no `bankId`/`employerId` scope. ',
+      'Phase 1 will tighten this to reject those roles and route them through dedicated paths ',
+      '(`/dashboard/auth/business/register` for self-serve business owners; `/dashboard/team/invite` for team additions; ',
+      'platform-admin-only for new bank entities).',
+    ].join('\n\n'),
+  })
   @ApiBody({ type: RegisterDto })
   @ApiResponse({ status: 201, type: LoginResponseDto })
   @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'EMAIL_ALREADY_REGISTERED' })
@@ -64,7 +76,18 @@ export class DashboardAuthController {
 
   @Post('email/login')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Email + password login.' })
+  @ApiOperation({
+    summary: 'Email + password login.',
+    description: [
+      '**Audience:** Employer-web + bank-web (`bearer-user` JWT scheme).',
+      '**Powers:** `/login` page on either dashboard.',
+      '**Behavior:** On success the response sets an `HttpOnly Secure SameSite=Lax` refresh cookie scoped to ',
+      '`Path=/v1/dashboard/auth`. In production with `COOKIE_DOMAIN=.forge.app`, the cookie is shared between ',
+      '`employer.forge.app` and `bank.forge.app` so a user can switch dashboards without re-authenticating ',
+      '(role gating is enforced server-side regardless).',
+      '**Demo logins** (password `forge-demo-pass`): see HANDOFF.md.',
+    ].join('\n\n'),
+  })
   @ApiBody({ type: LoginDto })
   @ApiResponse({ status: 200, type: LoginResponseDto })
   @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'INVALID_CREDENTIALS' })
@@ -84,7 +107,14 @@ export class DashboardAuthController {
 
   @Post('email/verify')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Verify email via token from the verification link.' })
+  @ApiOperation({
+    summary: 'Verify email via token from the verification link.',
+    description: [
+      '**Audience:** Employer-web + bank-web.',
+      '**Powers:** Public landing page reached from "Verify your email" link in the welcome email. ',
+      'The page reads the `token` query param and POSTs it here.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 204 })
   async verify(@Body() body: VerifyEmailDto) {
     await this.auth.verifyEmail(body);
@@ -92,7 +122,14 @@ export class DashboardAuthController {
 
   @Post('email/forgot')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Send a password-reset link. Always 204 (does not leak existence).' })
+  @ApiOperation({
+    summary: 'Send a password-reset link. Always 204 (does not leak existence).',
+    description: [
+      '**Audience:** Employer-web + bank-web.',
+      '**Powers:** "Forgot password?" link on `/login`. ',
+      '**Privacy:** Always returns 204 whether or not the email exists, to avoid disclosing account ownership.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 204 })
   async forgot(@Body() body: ForgotPasswordDto) {
     await this.auth.forgot(body);
@@ -100,7 +137,14 @@ export class DashboardAuthController {
 
   @Post('email/reset')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Reset password using a token from the email link.' })
+  @ApiOperation({
+    summary: 'Reset password using a token from the email link.',
+    description: [
+      '**Audience:** Employer-web + bank-web.',
+      '**Powers:** `/reset-password?token=…` page reached from the password-reset email. ',
+      'On success the user is redirected to `/login` and signs in with the new password.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 204 })
   async reset(@Body() body: ResetPasswordDto) {
     await this.auth.reset(body);
@@ -110,7 +154,16 @@ export class DashboardAuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Rotate the refresh cookie + issue a new access token.',
-    description: 'Refresh token comes from the HttpOnly cookie. Reuse triggers family revoke.',
+    description: [
+      '**Audience:** Employer-web + bank-web.',
+      '**Powers:** App-boot session restoration AND silent refresh inside the FE API client (called on 401, ',
+      'see FRONTEND_INTEGRATION.md §4).',
+      '**Behavior:** Reads the refresh token from the `HttpOnly` cookie (no JS access). Single-use — the response ',
+      'rotates the cookie. Reuse-detection: presenting the same refresh token twice invalidates the entire token ',
+      'family, signing the user out everywhere. The FE must coalesce concurrent refreshes into one in-flight promise.',
+      '',
+      '> The mobile equivalent is `POST /v1/auth/refresh` (body-based, different JWT secret).',
+    ].join('\n\n'),
   })
   @ApiResponse({ status: 200, type: LoginResponseDto })
   @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'TOKEN_INVALID | TOKEN_EXPIRED' })
@@ -131,7 +184,14 @@ export class DashboardAuthController {
 
   @Post('logout')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Invalidate the current refresh cookie.' })
+  @ApiOperation({
+    summary: 'Invalidate the current refresh cookie.',
+    description: [
+      '**Audience:** Employer-web + bank-web.',
+      '**Powers:** "Sign out" in the user menu (top-right of either dashboard). ',
+      'Clears the cookie server-side; the FE must also wipe the in-memory access token.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 204 })
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const cookieName = this.config.get<string>('cookies.refreshName')!;
@@ -144,7 +204,13 @@ export class DashboardAuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(JwtUserAuthGuard)
   @ApiBearerAuth('bearer-user')
-  @ApiOperation({ summary: 'Invalidate every refresh token for the current user.' })
+  @ApiOperation({
+    summary: 'Invalidate every refresh token for the current user.',
+    description: [
+      '**Audience:** Employer-web + bank-web.',
+      '**Powers:** "Sign out all devices" link in Settings → Security. Useful after a suspected credential leak.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 204 })
   async logoutAll(@CurrentUser() me: AuthedUser, @Res({ passthrough: true }) res: Response) {
     await this.auth.logoutAll(me.userId);
@@ -154,7 +220,18 @@ export class DashboardAuthController {
   @Get('me')
   @UseGuards(JwtUserAuthGuard)
   @ApiBearerAuth('bearer-user')
-  @ApiOperation({ summary: 'Current dashboard user + role + scope.' })
+  @ApiOperation({
+    summary: 'Current dashboard user + role + scope.',
+    description: [
+      '**Audience:** Employer-web + bank-web.',
+      '**Powers:** App boot — hydrates the user store on both dashboards. The returned `role` drives the entire ',
+      'nav visibility + route gating matrix (BACKEND_BRIEF §5: `business_owner`, `business_admin`, ',
+      '`business_hiring_manager`, `bank_credit_officer`, `bank_risk_analyst`). The returned `employerId` or ',
+      '`bankId` is informational — never resend it; the BE always derives tenant scope from the JWT.',
+      '',
+      '> The mobile equivalent is `GET /v1/me` (worker scope, different JWT, different shape).',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 200, type: SessionUserDto })
   me(@CurrentUser() me: AuthedUser): Promise<SessionUserDto> {
     return this.auth.me(me.userId);

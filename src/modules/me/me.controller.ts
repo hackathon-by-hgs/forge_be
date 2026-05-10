@@ -44,14 +44,29 @@ export class MeController {
   constructor(private readonly me: MeService) {}
 
   @Get()
-  @ApiOperation({ summary: 'Read the authenticated worker profile.' })
+  @ApiOperation({
+    summary: 'Read the authenticated worker profile.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** App boot — hydrates the user store. Also drives the Profile tab header.',
+      '',
+      '> The dashboard equivalent is `GET /v1/dashboard/auth/me` (different JWT, different shape).',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 200, type: WorkerEnvelopeDto })
   read(@CurrentWorker() me: AuthedWorker) {
     return this.me.me(me.workerId);
   }
 
   @Patch()
-  @ApiOperation({ summary: 'Update name, primary skill, photo, and/or preferred radius.' })
+  @ApiOperation({
+    summary: 'Update name, primary skill, photo, and/or preferred radius.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Profile tab → Edit profile sheet. Partial-update — only fields present in the body are touched. ',
+      'Photo updates require a fresh `upload_id` from `POST /uploads` (`purpose=profile_photo`).',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 200, type: WorkerEnvelopeDto })
   @ApiResponse({ status: 422, type: ErrorResponseDto, description: 'UPLOAD_NOT_FOUND | UPLOAD_REJECTED' })
   edit(@CurrentWorker() me: AuthedWorker, @Body() body: EditProfileDto) {
@@ -60,14 +75,26 @@ export class MeController {
 
   // ── Preferences ────────────────────────────────────────────────────────
   @Get('preferences')
-  @ApiOperation({ summary: 'Read notification + privacy preferences.' })
+  @ApiOperation({
+    summary: 'Read notification + privacy preferences.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Settings → Notifications + Privacy toggles (push, SMS, email, marketing, dark mode, language).',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 200, type: PreferencesDto })
   preferences(@CurrentWorker() me: AuthedWorker) {
     return this.me.preferences(me.workerId);
   }
 
   @Patch('preferences')
-  @ApiOperation({ summary: 'Patch preferences. Only present fields are updated.' })
+  @ApiOperation({
+    summary: 'Patch preferences. Only present fields are updated.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Per-toggle save on the Settings → Notifications + Privacy screen.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 200, type: PreferencesDto })
   patchPreferences(
     @CurrentWorker() me: AuthedWorker,
@@ -79,7 +106,15 @@ export class MeController {
   // ── Account ────────────────────────────────────────────────────────────
   @Post('account/delete')
   @HttpCode(HttpStatus.ACCEPTED)
-  @ApiOperation({ summary: 'Schedule account deletion (soft, 30-day window).' })
+  @ApiOperation({
+    summary: 'Schedule account deletion (soft, 30-day window).',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Settings → "Delete my account" confirmation screen. ',
+      '**Behavior:** Soft delete — account is marked for purge after a 30-day grace period. ',
+      '409 (`DELETE_BLOCKED`) if the worker has an active loan, in-progress job, or pending withdrawal.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 202, type: AccountDeletionResponseDto })
   @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'DELETE_BLOCKED' })
   delete(@CurrentWorker() me: AuthedWorker) {
@@ -88,7 +123,14 @@ export class MeController {
 
   @Post('phone/change/request')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Send OTP to a new phone number.' })
+  @ApiOperation({
+    summary: 'Send OTP to a new phone number.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Settings → Change phone number — step 1 of 2. Sends an OTP to the new number; ',
+      'returns a `challenge_id` to be submitted to `/me/phone/change/confirm`.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 200, type: RequestOtpResponseDto })
   @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'PHONE_ALREADY_EXISTS' })
   phoneChangeRequest(
@@ -100,7 +142,14 @@ export class MeController {
 
   @Post('phone/change/confirm')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Verify OTP and atomically swap the phone number.' })
+  @ApiOperation({
+    summary: 'Verify OTP and atomically swap the phone number.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Settings → Change phone number — step 2 of 2. Atomically swaps the worker\'s `phone` ',
+      '(unique constraint enforced) on successful OTP verification.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 200, type: WorkerEnvelopeDto })
   @ApiResponse({ status: 422, type: ErrorResponseDto, description: 'CODE_INCORRECT' })
   phoneChangeConfirm(
@@ -113,7 +162,14 @@ export class MeController {
   // ── Devices ────────────────────────────────────────────────────────────
   @Post('devices')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Register / refresh a push token for FCM or APNs.' })
+  @ApiOperation({
+    summary: 'Register / refresh a push token for FCM or APNs.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Silent — called on app launch and whenever the platform rotates the push token. ',
+      'Drives delivery of payment, application-accepted, and loan-status push notifications.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 204 })
   async registerDevice(
     @CurrentWorker() me: AuthedWorker,
@@ -124,7 +180,15 @@ export class MeController {
 
   // ── Notifications ──────────────────────────────────────────────────────
   @Get('notifications')
-  @ApiOperation({ summary: 'In-app notification feed.' })
+  @ApiOperation({
+    summary: 'In-app notification feed.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Bell icon in the app header → notifications drawer.',
+      '',
+      '> The dashboard equivalent is `GET /v1/notifications` (Phase 1, dashboard scope, different shape).',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 200, type: NotificationsListDto })
   notifications(
     @CurrentWorker() me: AuthedWorker,
@@ -135,7 +199,13 @@ export class MeController {
 
   @Post('notifications/:id/read')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Mark one notification as read. Idempotent.' })
+  @ApiOperation({
+    summary: 'Mark one notification as read. Idempotent.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Tap-to-read on individual notification rows; safe to call on already-read items.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 204 })
   async markRead(@CurrentWorker() me: AuthedWorker, @Param('id') id: string) {
     await this.me.markRead(me.workerId, id);
@@ -143,7 +213,13 @@ export class MeController {
 
   @Post('notifications/read-all')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Mark every notification as read.' })
+  @ApiOperation({
+    summary: 'Mark every notification as read.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** "Mark all as read" button at the top of the notifications drawer.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 204 })
   async markAllRead(@CurrentWorker() me: AuthedWorker) {
     await this.me.markAllRead(me.workerId);

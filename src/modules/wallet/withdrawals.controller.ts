@@ -44,7 +44,14 @@ export class WithdrawalsController {
   ) {}
 
   @Get('preview')
-  @ApiOperation({ summary: 'Preview fee, ETA and destination for a withdrawal.' })
+  @ApiOperation({
+    summary: 'Preview fee, ETA and destination for a withdrawal.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** Withdraw flow — the "you will receive ₦X after fees" confirmation card. ',
+      'Pure read; debounced as the worker edits the amount field.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 200, type: WithdrawalPreviewResponseDto })
   @ApiResponse({ status: 422, type: ErrorResponseDto, description: 'BELOW_MINIMUM | BANK_NOT_FOUND' })
   preview(@CurrentWorker() me: AuthedWorker, @Query() q: WithdrawalPreviewQueryDto) {
@@ -54,7 +61,16 @@ export class WithdrawalsController {
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @ApiIdempotencyKey()
-  @ApiOperation({ summary: 'Initiate a withdrawal to the chosen bank account.' })
+  @ApiOperation({
+    summary: 'Initiate a withdrawal to the chosen bank account.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** "Withdraw" final CTA on the wallet flow. Idempotent on `Idempotency-Key`. ',
+      '**Behavior:** Creates a `Transaction` row with `status=processing` and queues a Squad transfer. ',
+      'Final settlement comes via the Squad webhook — the mobile UI should poll the transaction or wait for the ',
+      '`payment_processed` push notification.',
+    ].join('\n\n'),
+  })
   @ApiResponse({ status: 201, type: WithdrawResponseDto })
   @ApiResponse({ status: 422, type: ErrorResponseDto, description: 'INSUFFICIENT_BALANCE | BELOW_MINIMUM' })
   @ApiResponse({ status: 502, type: ErrorResponseDto, description: 'PAYMENT_PROVIDER_UNAVAILABLE' })

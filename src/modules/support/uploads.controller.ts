@@ -42,7 +42,17 @@ export class UploadsController {
   @HttpCode(HttpStatus.CREATED)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 12 * 1024 * 1024 } }))
   @ApiConsumes('multipart/form-data')
-  @ApiOperation({ summary: 'Upload a photo/file. Returns an upload_id to reference in business endpoints.' })
+  @ApiOperation({
+    summary: 'Upload a photo/file. Returns an upload_id to reference in business endpoints.',
+    description: [
+      '**Audience:** Worker mobile app — direct multipart upload (the dashboard uses presigned PUT instead, ',
+      'see the planned `POST /v1/uploads/presign` for Phase 2).',
+      '**Powers:** Profile photo picker, clock-out photo proof, support-ticket attachments. The returned ',
+      '`upload_id` is consumed by `/auth/profile-setup`, `/sessions/:id/clock-out`, `/me` (PATCH), etc.',
+      '**Limits:** 12 MB hard cap (multer); image/* and a small allowlist of PDF/document types. ',
+      '413 on oversize, 415 on bad content type.',
+    ].join('\n\n'),
+  })
   @ApiBody({
     schema: {
       type: 'object',
