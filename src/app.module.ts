@@ -25,6 +25,8 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { SearchModule } from './modules/search/search.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { EmployerWorkersModule } from './modules/employer-workers/employer-workers.module';
+import { EmployerCreditModule } from './modules/employer-credit/employer-credit.module';
+import { EmployerAnalyticsModule } from './modules/employer-analytics/employer-analytics.module';
 import { LifecycleModule } from './modules/lifecycle/lifecycle.module';
 
 @Module({
@@ -48,6 +50,8 @@ import { LifecycleModule } from './modules/lifecycle/lifecycle.module';
     EmployerModule,
     EmployerJobsModule,
     EmployerWorkersModule,
+    EmployerCreditModule,
+    EmployerAnalyticsModule,
     EmployerPaymentsModule,
     BankModule,
     NotificationsModule,
