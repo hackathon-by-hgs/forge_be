@@ -4,6 +4,7 @@ import { BankRiskRadarService } from './bank-risk-radar.service';
 import { BankLoansService } from './bank-loans.service';
 import { BankApplicationsService } from './bank-applications.service';
 import { BankBorrowersService } from './bank-borrowers.service';
+import { BankRiskFlaggingCron } from './bank-risk-flagging.cron';
 
 @Module({
   controllers: [BankController],
@@ -12,6 +13,7 @@ import { BankBorrowersService } from './bank-borrowers.service';
     BankLoansService,
     BankApplicationsService,
     BankBorrowersService,
+    BankRiskFlaggingCron,
   ],
 })
 export class BankModule {}

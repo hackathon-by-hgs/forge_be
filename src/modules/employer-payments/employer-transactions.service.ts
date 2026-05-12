@@ -51,7 +51,9 @@ export class EmployerTransactionsService {
       this.prisma.transaction.count({ where }),
     ]);
 
-    const jobIds = rows.map((r) => r.relatedJobId).filter((id): id is string => !!id);
+    const jobIds = rows
+      .map((r) => r.relatedJobId)
+      .filter((id): id is string => !!id);
     const jobs = jobIds.length
       ? await this.prisma.job.findMany({
           where: { id: { in: jobIds } },
@@ -61,7 +63,9 @@ export class EmployerTransactionsService {
     const jobTitleById = new Map(jobs.map((j) => [j.id, j.title]));
 
     return paginate<TransactionDto>(
-      rows.map((r) => this.toDto(r, r.worker, jobTitleById.get(r.relatedJobId ?? ''))),
+      rows.map((r) =>
+        this.toDto(r, r.worker, jobTitleById.get(r.relatedJobId ?? '')),
+      ),
       total,
       page,
       pageSize,
@@ -90,39 +94,42 @@ export class EmployerTransactionsService {
     const eid = this.requireScope(employerId);
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const windowStart = new Date(now.getTime() - SUMMARY_WINDOW_DAYS * 86_400_000);
+    const windowStart = new Date(
+      now.getTime() - SUMMARY_WINDOW_DAYS * 86_400_000,
+    );
 
-    const [paidThisMonth, pending, completedWindow, largest] = await Promise.all([
-      this.prisma.transaction.aggregate({
-        where: {
-          employerId: eid,
-          status: { in: COMPLETED_DB_STATUSES },
-          timestamp: { gte: startOfMonth },
-        },
-        _sum: { amount: true },
-      }),
-      this.prisma.transaction.aggregate({
-        where: { employerId: eid, status: { in: PENDING_DB_STATUSES } },
-        _sum: { amount: true },
-        _count: { _all: true },
-      }),
-      this.prisma.transaction.aggregate({
-        where: {
-          employerId: eid,
-          status: { in: COMPLETED_DB_STATUSES },
-          timestamp: { gte: windowStart },
-        },
-        _avg: { amount: true },
-      }),
-      this.prisma.transaction.aggregate({
-        where: {
-          employerId: eid,
-          status: { in: COMPLETED_DB_STATUSES },
-          timestamp: { gte: windowStart },
-        },
-        _max: { amount: true },
-      }),
-    ]);
+    const [paidThisMonth, pending, completedWindow, largest] =
+      await Promise.all([
+        this.prisma.transaction.aggregate({
+          where: {
+            employerId: eid,
+            status: { in: COMPLETED_DB_STATUSES },
+            timestamp: { gte: startOfMonth },
+          },
+          _sum: { amount: true },
+        }),
+        this.prisma.transaction.aggregate({
+          where: { employerId: eid, status: { in: PENDING_DB_STATUSES } },
+          _sum: { amount: true },
+          _count: { _all: true },
+        }),
+        this.prisma.transaction.aggregate({
+          where: {
+            employerId: eid,
+            status: { in: COMPLETED_DB_STATUSES },
+            timestamp: { gte: windowStart },
+          },
+          _avg: { amount: true },
+        }),
+        this.prisma.transaction.aggregate({
+          where: {
+            employerId: eid,
+            status: { in: COMPLETED_DB_STATUSES },
+            timestamp: { gte: windowStart },
+          },
+          _max: { amount: true },
+        }),
+      ]);
 
     return {
       paidThisMonthNaira: paidThisMonth._sum.amount ?? 0,
@@ -167,7 +174,7 @@ export class EmployerTransactionsService {
       throw new AppError(
         422,
         'WORKER_NO_BANK_ACCOUNT',
-        'The worker has not linked a default bank account yet — funds can\'t be transferred.',
+        "The worker has not linked a default bank account yet — funds can't be transferred.",
       );
     }
 
@@ -183,7 +190,8 @@ export class EmployerTransactionsService {
       accountNumber: defaultAccount.accountNumber,
       accountName: defaultAccount.accountName,
       amountNaira: body.amountNaira,
-      remark: body.description?.slice(0, 80) ?? `Forge transfer to ${worker.name}`,
+      remark:
+        body.description?.slice(0, 80) ?? `Forge transfer to ${worker.name}`,
     });
 
     if (!outcome.ok) {
@@ -198,7 +206,8 @@ export class EmployerTransactionsService {
         kind: 'manual_transfer',
         amount: body.amountNaira,
         timestamp: new Date(),
-        title: body.description?.slice(0, 80) ?? `Manual transfer to ${worker.name}`,
+        title:
+          body.description?.slice(0, 80) ?? `Manual transfer to ${worker.name}`,
         subtitle: body.jobId ? `Linked to ${body.jobId}` : 'Manual payout',
         relatedJobId: body.jobId ?? null,
         squadReference,
@@ -264,8 +273,8 @@ export class EmployerTransactionsService {
         yield csvLine([
           t.id,
           t.squadReference ?? '',
-          t.workerId,
-          t.worker.name,
+          t.workerId ?? '',
+          t.worker?.name ?? '',
           t.relatedJobId ?? '',
           String(t.amount),
           mapTransactionStatusToWire(t.status),
@@ -282,12 +291,19 @@ export class EmployerTransactionsService {
   // ── Internals ────────────────────────────────────────────────────────────
   private requireScope(employerId: string | null): string {
     if (!employerId) {
-      throw new AppError(403, 'NO_EMPLOYER_SCOPE', 'This account is not bound to a business.');
+      throw new AppError(
+        403,
+        'NO_EMPLOYER_SCOPE',
+        'This account is not bound to a business.',
+      );
     }
     return employerId;
   }
 
-  private buildWhere(employerId: string, q: TransactionsListQueryDto): Prisma.TransactionWhereInput {
+  private buildWhere(
+    employerId: string,
+    q: TransactionsListQueryDto,
+  ): Prisma.TransactionWhereInput {
     const where: Prisma.TransactionWhereInput = { employerId };
     if (q.status) {
       // Honour the wire value but also accept the legacy 'succeeded' under 'completed'.
@@ -338,11 +354,13 @@ export class EmployerTransactionsService {
 // ── Pure helpers ─────────────────────────────────────────────────────────────
 
 function csvLine(fields: string[]): string {
-  return fields
-    .map((f) => {
-      const needsQuote = /[",\n\r]/.test(f);
-      const escaped = f.replace(/"/g, '""');
-      return needsQuote ? `"${escaped}"` : escaped;
-    })
-    .join(',') + '\r\n';
+  return (
+    fields
+      .map((f) => {
+        const needsQuote = /[",\n\r]/.test(f);
+        const escaped = f.replace(/"/g, '""');
+        return needsQuote ? `"${escaped}"` : escaped;
+      })
+      .join(',') + '\r\n'
+  );
 }

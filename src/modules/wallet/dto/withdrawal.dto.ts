@@ -1,6 +1,6 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsInt, IsString, Min } from 'class-validator';
+import { IsInt, IsOptional, IsString, Min } from 'class-validator';
 import { TransactionDto } from './transaction.dto';
 
 export class WithdrawalPreviewQueryDto {
@@ -10,9 +10,14 @@ export class WithdrawalPreviewQueryDto {
   @Min(1)
   amount!: number;
 
-  @ApiProperty({ example: 'bnk_b2c8e1' })
+  @ApiPropertyOptional({
+    example: 'bnk_b2c8e1',
+    description:
+      "Optional. When omitted, the withdrawal targets the worker's own Squad virtual NUBAN (no external bank account required).",
+  })
+  @IsOptional()
   @IsString()
-  bank_account_id!: string;
+  bank_account_id?: string;
 }
 
 export class DestinationDto {
@@ -53,9 +58,14 @@ export class WithdrawDto {
   @Min(1)
   amount!: number;
 
-  @ApiProperty({ example: 'bnk_b2c8e1' })
+  @ApiPropertyOptional({
+    example: 'bnk_b2c8e1',
+    description:
+      "Optional. When omitted, the withdrawal targets the worker's own Squad virtual NUBAN.",
+  })
+  @IsOptional()
   @IsString()
-  bank_account_id!: string;
+  bank_account_id?: string;
 }
 
 export class WithdrawResponseDto {

@@ -64,7 +64,7 @@ async function bootstrap() {
         '- **Phase 1 — todo.** Employer Overview composite, Notifications, Search, Settings; tighten bank-signup gap.\n',
         '- **Phase 2 — todo.** Hire-to-clock-out lifecycle (Jobs, Workers, Applications, Sessions on the dashboard side).\n',
         '- **Phase 3 — todo.** Money — Transactions, Invoices, Payouts, Squad webhook.\n',
-        '- **Phase 4 — todo.** Analytics, Credit & Loans (employer), Bank Risk Radar, SSE stream.\n',
+        '- **Phase 4 — shipped.** Analytics, Credit & Loans (employer), Bank Risk Radar, SSE stream (`GET /v1/stream`), nightly score-recalc, risk-flagging, and Squad reconciliation crons.\n',
         '- **Phase 5 — todo.** Polish, NDPR data export, runbook, observability.\n\n',
         'Endpoints already implemented show up in this Swagger UI; planned ones are documented in ',
         '`BACKEND_BRIEF.md` §10 (canonical) and the FE feature map in `FRONTEND_INTEGRATION.md` §5.\n\n',
@@ -140,6 +140,10 @@ async function bootstrap() {
     .addTag(
       'Bank',
       'Bank dashboard — Phase 4+: Risk Radar composite, loan portfolio, bank-scoped notifications. Underwriting Sandbox / Performance Attribution / Borrower Profile are out of scope until the FE is built.',
+    )
+    .addTag(
+      'Stream',
+      'Both dashboards — Phase 4: Server-Sent Events at `GET /v1/stream`. One persistent connection per tab, tenant-scoped via JWT. Replaces tab-focus polling for Risk Radar + active-map + credit/payments surfaces.',
     )
     .build();
 

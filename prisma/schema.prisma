@@ -51,6 +51,9 @@ model Worker {
   averageWeeklyIncomeNaira Int      @default(0) @map("average_weekly_income_naira")
   eligibility              String   @default("ineligible")
   squadWalletId            String?  @unique @map("squad_wallet_id")
+  squadVirtualAccountNumber   String?  @unique @map("squad_virtual_account_number")
+  squadVirtualAccountBankCode String?  @map("squad_virtual_account_bank_code")
+  squadVirtualAccountName     String?  @map("squad_virtual_account_name")
   watchlistedAt            DateTime? @map("watchlisted_at")
 
   // Existing relations
@@ -186,6 +189,9 @@ model Employer {
   registeredAddress        String   @map("registered_address")
   joinedAt                 DateTime @default(now()) @map("joined_at")
   squadWalletId            String?  @unique @map("squad_wallet_id")
+  squadVirtualAccountNumber   String?  @unique @map("squad_virtual_account_number")
+  squadVirtualAccountBankCode String?  @map("squad_virtual_account_bank_code")
+  squadVirtualAccountName     String?  @map("squad_virtual_account_name")
 
   // Worker-mobile-facing fields. The mobile feed embeds an employer summary on each
   // job; these power that view. Updated by the employer dashboard's settings endpoints.
@@ -228,6 +234,7 @@ model Employer {
   team             EmployerTeamMember[]
   blocks           EmployerBlock[]
   invitations      TeamInvitation[]
+  creditHistory    EmployerCreditHistory[]
 
   @@map("employers")
 }
@@ -286,6 +293,7 @@ model Job {
   title                 String
   description           String
   payAmount             Int      @map("pay_amount")
+  reservedAmountNaira   Int      @default(0) @map("reserved_amount_naira")
   durationHours         Int      @map("duration_hours")
   lat                   Float
   lng                   Float
@@ -487,7 +495,7 @@ model BankAccount {
 
 model Transaction {
   id              String   @id
-  workerId        String   @map("worker_id")
+  workerId        String?  @map("worker_id")
   employerId      String?  @map("employer_id")
   kind            String
   amount          Int
@@ -502,7 +510,7 @@ model Transaction {
   settledAt       DateTime? @map("settled_at")
   createdAt       DateTime @default(now()) @map("created_at")
 
-  worker   Worker    @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  worker   Worker?   @relation(fields: [workerId], references: [id], onDelete: Cascade)
   employer Employer? @relation("EmployerTransactions", fields: [employerId], references: [id])
 
   @@index([workerId, timestamp(sort: Desc)])
@@ -794,4 +802,25 @@ model JobRun {
 
   @@index([name, startedAt(sort: Desc)])
   @@map("job_runs")
+}
+
+// Score-recalc snapshot — written nightly by the `score-recalc` cron.
+// Powers the real `trend12Week` / `scoreDeltaPoints` series on the
+// employer credit page once at least 1 row exists.
+model EmployerCreditHistory {
+  id                     String   @id
+  employerId             String   @map("employer_id")
+  capturedAt             DateTime @map("captured_at")
+  score                  Int
+  paymentTimeliness      Float    @map("payment_timeliness")
+  workerRetention        Float    @map("worker_retention")
+  transactionConsistency Float    @map("transaction_consistency")
+  growthTrend            Float    @map("growth_trend")
+  timeOnPlatform         Float    @map("time_on_platform")
+
+  employer Employer @relation(fields: [employerId], references: [id], onDelete: Cascade)
+
+  @@unique([employerId, capturedAt])
+  @@index([employerId, capturedAt(sort: Desc)])
+  @@map("employer_credit_history")
 }

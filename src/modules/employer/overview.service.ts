@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppError } from '../../common/utils/app-error';
+import { VirtualAccountProvisioner } from '../squad/virtual-account-provisioner.service';
 import {
   AttentionItemDto,
   CashPositionDto,
@@ -13,7 +14,13 @@ import {
   StartingSoonJobDto,
 } from './dto/overview.dto';
 
-const ACTIVE_STATUSES = ['open', 'applications_in', 'accepted', 'in_progress', 'pending_verification'];
+const ACTIVE_STATUSES = [
+  'open',
+  'applications_in',
+  'accepted',
+  'in_progress',
+  'pending_verification',
+];
 const LATE_THRESHOLD_MINUTES = 15;
 const STARTING_SOON_HOURS = 6;
 const TREND_BUCKETS = 9;
@@ -21,11 +28,18 @@ const SPEND_TREND_DAYS = 7;
 
 @Injectable()
 export class EmployerOverviewService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly virtualAccount: VirtualAccountProvisioner,
+  ) {}
 
   async overview(employerId: string | null): Promise<EmployerOverviewDto> {
     if (!employerId) {
-      throw new AppError(403, 'NO_EMPLOYER_SCOPE', 'This account is not bound to a business.');
+      throw new AppError(
+        403,
+        'NO_EMPLOYER_SCOPE',
+        'This account is not bound to a business.',
+      );
     }
 
     const now = new Date();
@@ -33,49 +47,53 @@ export class EmployerOverviewService {
     const sevenDaysAgo = addDays(startOfToday, -SPEND_TREND_DAYS + 1);
     const trendStart = addDays(startOfToday, -(TREND_BUCKETS - 1));
 
-    const [employer, jobs, recentTransactions, recentJobsForTrend] = await Promise.all([
-      this.prisma.employer.findUnique({
-        where: { id: employerId },
-        select: {
-          id: true,
-          walletBalanceNaira: true,
-          creditScore: true,
-          totalLaborSpendNaira: true,
-          paymentTimelinessRate: true,
-        },
-      }),
-      this.prisma.job.findMany({
-        where: { employerId, deletedAt: null },
-        select: {
-          id: true,
-          title: true,
-          status: true,
-          startTime: true,
-          payAmount: true,
-          neighborhood: true,
-          lat: true,
-          lng: true,
-          applicantsCount: true,
-          createdAt: true,
-        },
-        orderBy: { startTime: 'asc' },
-      }),
-      this.prisma.transaction.findMany({
-        where: {
-          employerId,
-          timestamp: { gte: trendStart },
-        },
-        select: { amount: true, status: true, timestamp: true },
-      }),
-      this.prisma.job.findMany({
-        where: {
-          employerId,
-          deletedAt: null,
-          createdAt: { gte: trendStart },
-        },
-        select: { createdAt: true, completedAt: true, status: true },
-      }),
-    ]);
+    const [employer, jobs, recentTransactions, recentJobsForTrend] =
+      await Promise.all([
+        this.prisma.employer.findUnique({
+          where: { id: employerId },
+          select: {
+            id: true,
+            walletBalanceNaira: true,
+            creditScore: true,
+            totalLaborSpendNaira: true,
+            paymentTimelinessRate: true,
+            squadVirtualAccountNumber: true,
+            squadVirtualAccountBankCode: true,
+            squadVirtualAccountName: true,
+          },
+        }),
+        this.prisma.job.findMany({
+          where: { employerId, deletedAt: null },
+          select: {
+            id: true,
+            title: true,
+            status: true,
+            startTime: true,
+            payAmount: true,
+            neighborhood: true,
+            lat: true,
+            lng: true,
+            applicantsCount: true,
+            createdAt: true,
+          },
+          orderBy: { startTime: 'asc' },
+        }),
+        this.prisma.transaction.findMany({
+          where: {
+            employerId,
+            timestamp: { gte: trendStart },
+          },
+          select: { amount: true, status: true, timestamp: true },
+        }),
+        this.prisma.job.findMany({
+          where: {
+            employerId,
+            deletedAt: null,
+            createdAt: { gte: trendStart },
+          },
+          select: { createdAt: true, completedAt: true, status: true },
+        }),
+      ]);
 
     if (!employer) {
       // Auth said you have an employerId but the row is gone — surface as NOT_FOUND
@@ -93,7 +111,9 @@ export class EmployerOverviewService {
       trendStart,
       TREND_BUCKETS,
     );
-    const workersWorkingNow = activeJobs.filter((j) => j.status === 'in_progress').length;
+    const workersWorkingNow = activeJobs.filter(
+      (j) => j.status === 'in_progress',
+    ).length;
     const workersWorkingTrend = bucketCountByDay(
       recentJobsForTrend
         .filter((j) => j.status === 'in_progress' || j.status === 'completed')
@@ -102,7 +122,9 @@ export class EmployerOverviewService {
       TREND_BUCKETS,
     );
 
-    const completedTxs = recentTransactions.filter((t) => t.status === 'completed' || t.status === 'succeeded');
+    const completedTxs = recentTransactions.filter(
+      (t) => t.status === 'completed' || t.status === 'succeeded',
+    );
     const todaySpend = completedTxs
       .filter((t) => t.timestamp >= startOfToday)
       .reduce((acc, t) => acc + t.amount, 0);
@@ -112,7 +134,9 @@ export class EmployerOverviewService {
       TREND_BUCKETS,
     );
 
-    const pendingTxs = recentTransactions.filter((t) => t.status === 'pending' || t.status === 'processing');
+    const pendingTxs = recentTransactions.filter(
+      (t) => t.status === 'pending' || t.status === 'processing',
+    );
     const pendingTrend = bucketCountByDay(
       pendingTxs.map((t) => t.timestamp),
       trendStart,
@@ -138,11 +162,19 @@ export class EmployerOverviewService {
     const attention: AttentionItemDto[] = [];
 
     const applicationsWaiting = activeJobs.reduce(
-      (acc, j) => acc + (j.status === 'applications_in' || j.status === 'open' ? j.applicantsCount : 0),
+      (acc, j) =>
+        acc +
+        (j.status === 'applications_in' || j.status === 'open'
+          ? j.applicantsCount
+          : 0),
       0,
     );
     if (applicationsWaiting > 0) {
-      attention.push({ kind: 'applications_waiting', count: applicationsWaiting, href: '/jobs/active' });
+      attention.push({
+        kind: 'applications_waiting',
+        count: applicationsWaiting,
+        href: '/jobs/active',
+      });
     }
 
     const startingSoonWindow = addMinutes(now, STARTING_SOON_HOURS * 60);
@@ -150,15 +182,25 @@ export class EmployerOverviewService {
       (j) => j.startTime > now && j.startTime <= startingSoonWindow,
     ).length;
     if (startingSoonCount > 0) {
-      attention.push({ kind: 'starting_soon', count: startingSoonCount, href: '/jobs/active' });
+      attention.push({
+        kind: 'starting_soon',
+        count: startingSoonCount,
+        href: '/jobs/active',
+      });
     }
 
     const lateThreshold = addMinutes(now, -LATE_THRESHOLD_MINUTES);
     const workerLateCount = activeJobs.filter(
-      (j) => (j.status === 'accepted' || j.status === 'open') && j.startTime <= lateThreshold,
+      (j) =>
+        (j.status === 'accepted' || j.status === 'open') &&
+        j.startTime <= lateThreshold,
     ).length;
     if (workerLateCount > 0) {
-      attention.push({ kind: 'worker_late', count: workerLateCount, href: '/workers/active' });
+      attention.push({
+        kind: 'worker_late',
+        count: workerLateCount,
+        href: '/workers/active',
+      });
     }
 
     // ── Cash position ──────────────────────────────────────────────────────
@@ -177,18 +219,39 @@ export class EmployerOverviewService {
       walletBalanceNaira: employer.walletBalanceNaira,
       projectedWeeklySpendNaira: last7Total,
       spendTrend7d,
+      virtualAccount:
+        employer.squadVirtualAccountNumber &&
+        employer.squadVirtualAccountBankCode
+          ? {
+              number: employer.squadVirtualAccountNumber,
+              bankCode: employer.squadVirtualAccountBankCode,
+              accountName: employer.squadVirtualAccountName ?? '',
+            }
+          : null,
     };
+
+    // Lazy retry: if Squad provisioning failed at signup (or this is a seeded
+    // employer), fire-and-forget re-provision so the next overview hit has it.
+    if (!employer.squadVirtualAccountNumber) {
+      void this.virtualAccount.ensureForEmployer(employerId);
+    }
 
     // ── Credit health ──────────────────────────────────────────────────────
     // Until the scoring engine emits factor breakdowns, surface a stable, derived
     // top-factors view. Real factor deltas land with Phase 4 analytics.
     const score = employer.creditScore;
-    const eligibility = computeEligibility(score, employer.totalLaborSpendNaira);
+    const eligibility = computeEligibility(
+      score,
+      employer.totalLaborSpendNaira,
+    );
     const creditHealth: CreditHealthDto = {
       score,
       deltaPoints: 0,
       topFactors: [
-        { label: 'Payment timeliness', deltaPoints: Math.round((employer.paymentTimelinessRate - 0.85) * 60) },
+        {
+          label: 'Payment timeliness',
+          deltaPoints: Math.round((employer.paymentTimelinessRate - 0.85) * 60),
+        },
         { label: 'Worker retention', deltaPoints: 0 },
         { label: 'Job cancellation rate', deltaPoints: 0 },
       ],
@@ -251,10 +314,16 @@ function formatDay(d: Date): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function bucketCountByDay(timestamps: Date[], start: Date, buckets: number): number[] {
+function bucketCountByDay(
+  timestamps: Date[],
+  start: Date,
+  buckets: number,
+): number[] {
   const out = new Array<number>(buckets).fill(0);
   for (const t of timestamps) {
-    const idx = Math.floor((startOfDay(t).getTime() - start.getTime()) / 86_400_000);
+    const idx = Math.floor(
+      (startOfDay(t).getTime() - start.getTime()) / 86_400_000,
+    );
     if (idx >= 0 && idx < buckets) out[idx] += 1;
   }
   return out;
@@ -267,13 +336,18 @@ function bucketSumByDay(
 ): number[] {
   const out = new Array<number>(buckets).fill(0);
   for (const { at, value } of rows) {
-    const idx = Math.floor((startOfDay(at).getTime() - start.getTime()) / 86_400_000);
+    const idx = Math.floor(
+      (startOfDay(at).getTime() - start.getTime()) / 86_400_000,
+    );
     if (idx >= 0 && idx < buckets) out[idx] += value;
   }
   return out;
 }
 
-function computeEligibility(score: number, totalSpendNaira: number): {
+function computeEligibility(
+  score: number,
+  totalSpendNaira: number,
+): {
   maxAmountNaira: number;
   aprPct: number;
 } {

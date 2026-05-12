@@ -17,5 +17,13 @@ export function toWorkerDto(w: Worker): WorkerDto {
     average_rating: w.averageRating,
     credit_score: w.creditScore,
     joined_at: w.joinedAt.toISOString(),
+    virtual_account:
+      w.squadVirtualAccountNumber && w.squadVirtualAccountBankCode
+        ? {
+            number: w.squadVirtualAccountNumber,
+            bank_code: w.squadVirtualAccountBankCode,
+            account_name: w.squadVirtualAccountName ?? '',
+          }
+        : null,
   };
 }

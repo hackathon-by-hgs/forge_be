@@ -6,9 +6,17 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { toWorkerDto } from '../me/me.mapper';
-import { OtpFlow, RequestOtpDto, RequestOtpResponseDto } from './dto/request-otp.dto';
+import { VirtualAccountProvisioner } from '../squad/virtual-account-provisioner.service';
+import {
+  OtpFlow,
+  RequestOtpDto,
+  RequestOtpResponseDto,
+} from './dto/request-otp.dto';
 import { VerifyOtpDto, VerifyOtpResponseDto } from './dto/verify-otp.dto';
-import { ProfileSetupDto, ProfileSetupResponseDto } from './dto/profile-setup.dto';
+import {
+  ProfileSetupDto,
+  ProfileSetupResponseDto,
+} from './dto/profile-setup.dto';
 import { TokenPairDto } from './dto/refresh.dto';
 
 @Injectable()
@@ -19,17 +27,28 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly virtualAccount: VirtualAccountProvisioner,
   ) {}
 
   // ── OTP request ────────────────────────────────────────────────────────────
   async requestOtp(body: RequestOtpDto): Promise<RequestOtpResponseDto> {
-    const existing = await this.prisma.worker.findUnique({ where: { phoneNumber: body.phone } });
+    const existing = await this.prisma.worker.findUnique({
+      where: { phoneNumber: body.phone },
+    });
 
     if (body.flow === OtpFlow.Login && !existing) {
-      throw new AppError(404, 'PHONE_NOT_FOUND', 'No account found for this phone number.');
+      throw new AppError(
+        404,
+        'PHONE_NOT_FOUND',
+        'No account found for this phone number.',
+      );
     }
     if (body.flow === OtpFlow.Signup && existing) {
-      throw new AppError(409, 'PHONE_ALREADY_EXISTS', 'An account already exists for this phone number.');
+      throw new AppError(
+        409,
+        'PHONE_ALREADY_EXISTS',
+        'An account already exists for this phone number.',
+      );
     }
 
     // Recent-attempt rate limit: 3 OTPs / phone / 15 min.
@@ -38,7 +57,12 @@ export class AuthService {
       where: { phone: body.phone, createdAt: { gte: since } },
     });
     if (recent >= 3) {
-      throw new AppError(429, 'RATE_LIMITED', 'Too many OTP requests. Try again later.', { retry_after_seconds: 900 });
+      throw new AppError(
+        429,
+        'RATE_LIMITED',
+        'Too many OTP requests. Try again later.',
+        { retry_after_seconds: 900 },
+      );
     }
 
     const ttl = this.config.get<number>('otp.ttlSeconds')!;
@@ -59,7 +83,9 @@ export class AuthService {
     });
 
     if (this.config.get<boolean>('otp.debugExpose')) {
-      this.logger.warn(`OTP for ${body.phone} (challenge ${challenge.id}): ${code}`);
+      this.logger.warn(
+        `OTP for ${body.phone} (challenge ${challenge.id}): ${code}`,
+      );
     }
     // TODO: dispatch SMS via Termii / Twilio (sender id "FORGE").
 
@@ -72,19 +98,33 @@ export class AuthService {
 
   // ── OTP verify ────────────────────────────────────────────────────────────
   async verifyOtp(body: VerifyOtpDto): Promise<VerifyOtpResponseDto> {
-    const challenge = await this.prisma.otpChallenge.findUnique({ where: { id: body.challenge_id } });
+    const challenge = await this.prisma.otpChallenge.findUnique({
+      where: { id: body.challenge_id },
+    });
     if (!challenge) {
       throw new AppError(404, 'CHALLENGE_NOT_FOUND', 'Unknown OTP challenge.');
     }
     if (challenge.consumed) {
-      throw new AppError(410, 'CHALLENGE_EXPIRED', 'This OTP challenge has already been used.');
+      throw new AppError(
+        410,
+        'CHALLENGE_EXPIRED',
+        'This OTP challenge has already been used.',
+      );
     }
     if (challenge.expiresAt < new Date()) {
-      throw new AppError(410, 'CHALLENGE_EXPIRED', 'OTP expired. Request a new one.');
+      throw new AppError(
+        410,
+        'CHALLENGE_EXPIRED',
+        'OTP expired. Request a new one.',
+      );
     }
     const maxAttempts = this.config.get<number>('otp.maxAttempts')!;
     if (challenge.attempts >= maxAttempts) {
-      throw new AppError(429, 'TOO_MANY_ATTEMPTS', 'Too many wrong codes. Request a new OTP.');
+      throw new AppError(
+        429,
+        'TOO_MANY_ATTEMPTS',
+        'Too many wrong codes. Request a new OTP.',
+      );
     }
 
     const ok = await argon2.verify(challenge.codeHash, body.code);
@@ -104,12 +144,18 @@ export class AuthService {
     });
 
     if (challenge.flow === OtpFlow.Login) {
-      const worker = await this.prisma.worker.findUnique({ where: { phoneNumber: challenge.phone } });
+      const worker = await this.prisma.worker.findUnique({
+        where: { phoneNumber: challenge.phone },
+      });
       if (!worker) {
         throw new AppError(404, 'PHONE_NOT_FOUND', 'Account no longer exists.');
       }
       const tokens = await this.issueTokenPair(worker.id);
-      return { ...tokens, worker: toWorkerDto(worker), needs_profile_setup: false };
+      return {
+        ...tokens,
+        worker: toWorkerDto(worker),
+        needs_profile_setup: false,
+      };
     }
 
     // Signup: create a "shell" worker so the access token can be issued. Profile-setup
@@ -128,8 +174,13 @@ export class AuthService {
   }
 
   // ── Profile setup (signup completion) ──────────────────────────────────────
-  async profileSetup(workerId: string, body: ProfileSetupDto): Promise<ProfileSetupResponseDto> {
-    const worker = await this.prisma.worker.findUnique({ where: { id: workerId } });
+  async profileSetup(
+    workerId: string,
+    body: ProfileSetupDto,
+  ): Promise<ProfileSetupResponseDto> {
+    const worker = await this.prisma.worker.findUnique({
+      where: { id: workerId },
+    });
     if (!worker) throw new AppError(404, 'NOT_FOUND', 'Worker not found.');
 
     const alreadySetUp = worker.name !== '' && worker.primarySkill !== '';
@@ -140,12 +191,25 @@ export class AuthService {
 
     let photoUrl: string | null = worker.photoUrl;
     if (body.photo_upload_id) {
-      const upload = await this.prisma.upload.findUnique({ where: { id: body.photo_upload_id } });
-      if (!upload || upload.workerId !== workerId || upload.purpose !== 'worker_avatar') {
-        throw new AppError(422, 'UPLOAD_NOT_FOUND', 'Photo upload not found or expired.');
+      const upload = await this.prisma.upload.findUnique({
+        where: { id: body.photo_upload_id },
+      });
+      if (
+        !upload ||
+        upload.workerId !== workerId ||
+        upload.purpose !== 'worker_avatar'
+      ) {
+        throw new AppError(
+          422,
+          'UPLOAD_NOT_FOUND',
+          'Photo upload not found or expired.',
+        );
       }
       photoUrl = upload.url;
-      await this.prisma.upload.update({ where: { id: upload.id }, data: { promoted: true } });
+      await this.prisma.upload.update({
+        where: { id: upload.id },
+        data: { promoted: true },
+      });
     }
 
     const updated = await this.prisma.worker.update({
@@ -165,6 +229,11 @@ export class AuthService {
       update: {},
     });
 
+    // Provision the Squad virtual NUBAN out-of-band — name + phone are
+    // now hydrated. Fire-and-forget so a Squad outage doesn't fail signup;
+    // the `GET /v1/me` lazy-retry catches any failure on the next request.
+    void this.virtualAccount.ensureForWorker(workerId);
+
     return { worker: toWorkerDto(updated) };
   }
 
@@ -180,18 +249,30 @@ export class AuthService {
     }
 
     const tokenHash = await this.hashRefresh(refreshToken);
-    const stored = await this.prisma.refreshToken.findUnique({ where: { tokenHash } });
+    const stored = await this.prisma.refreshToken.findUnique({
+      where: { tokenHash },
+    });
 
     if (!stored || stored.workerId !== payload.sub) {
       throw new AppError(401, 'TOKEN_INVALID', 'Refresh token is invalid.');
     }
     if (stored.usedAt) {
       // Token reuse detected — invalidate every refresh for this worker (defensive).
-      await this.prisma.refreshToken.deleteMany({ where: { workerId: stored.workerId } });
-      throw new AppError(401, 'TOKEN_INVALID', 'Refresh token has already been used.');
+      await this.prisma.refreshToken.deleteMany({
+        where: { workerId: stored.workerId },
+      });
+      throw new AppError(
+        401,
+        'TOKEN_INVALID',
+        'Refresh token has already been used.',
+      );
     }
     if (stored.expiresAt < new Date()) {
-      throw new AppError(401, 'TOKEN_EXPIRED', 'Refresh token has expired. Please log in again.');
+      throw new AppError(
+        401,
+        'TOKEN_EXPIRED',
+        'Refresh token has expired. Please log in again.',
+      );
     }
 
     await this.prisma.refreshToken.update({
@@ -215,7 +296,9 @@ export class AuthService {
     if (!this.config.get<boolean>('otp.debugExpose')) {
       throw new AppError(404, 'NOT_FOUND', 'Debug not enabled.');
     }
-    const c = await this.prisma.otpChallenge.findUnique({ where: { id: challengeId } });
+    const c = await this.prisma.otpChallenge.findUnique({
+      where: { id: challengeId },
+    });
     if (!c) throw new AppError(404, 'NOT_FOUND', 'Challenge not found.');
     // We can't recover the plaintext from argon2 — only confirm presence. So instead
     // expose the hash short-circuit by re-stamping a known-debug code on the next
@@ -230,11 +313,17 @@ export class AuthService {
 
     const access_token = await this.jwt.signAsync(
       { sub: workerId },
-      { secret: this.config.get<string>('jwt.accessSecret'), expiresIn: accessTtl },
+      {
+        secret: this.config.get<string>('jwt.accessSecret'),
+        expiresIn: accessTtl,
+      },
     );
     const refresh_token = await this.jwt.signAsync(
       { sub: workerId, jti },
-      { secret: this.config.get<string>('jwt.refreshSecret'), expiresIn: refreshTtl },
+      {
+        secret: this.config.get<string>('jwt.refreshSecret'),
+        expiresIn: refreshTtl,
+      },
     );
 
     const tokenHash = await this.hashRefresh(refresh_token);

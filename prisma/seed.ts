@@ -12,10 +12,35 @@
  */
 
 import 'dotenv/config';
+import { createHash } from 'crypto';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Prisma, PrismaClient } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { addHours, addMonths, formatISO, subDays, subHours, subMonths } from 'date-fns';
+
+/**
+ * Deterministic stub virtual-account values. Mirrors the math in
+ * `SquadClient.createVirtualAccount` stub mode so the seed produces the same
+ * NUBANs the runtime provisioner would. Lets demo logins land on a populated
+ * `virtualAccount` field without waiting for the lazy-retry on first /overview.
+ */
+function stubVirtualAccount(customerId: string, displayName: string): {
+  squadWalletId: string;
+  squadVirtualAccountNumber: string;
+  squadVirtualAccountBankCode: string;
+  squadVirtualAccountName: string;
+} {
+  const hash = createHash('sha1').update(customerId).digest('hex').slice(0, 8);
+  const nuban =
+    '99' +
+    hash.replace(/[a-f]/gi, (c) => String(c.charCodeAt(0) % 10));
+  return {
+    squadWalletId: `va_stub_${customerId}`,
+    squadVirtualAccountNumber: nuban,
+    squadVirtualAccountBankCode: '999',
+    squadVirtualAccountName: `Forge Test ${displayName}`.slice(0, 40),
+  };
+}
 
 // ─── RNG (mulberry32, identical to forge_fe/packages/mock-data/src/rng.ts) ───
 
@@ -271,8 +296,10 @@ async function seedEmployers() {
     const neighborhood = pick(rng, NEIGHBORHOODS);
     const coords = NEIGHBORHOOD_COORDS[neighborhood];
     const name = `${pick(rng, BUSINESS_PREFIXES)} ${pick(rng, BUSINESS_SUFFIXES)}`;
+    const id = empId(i + 1);
+    const va = stubVirtualAccount(id, name);
     rows.push({
-      id: empId(i + 1),
+      id,
       businessName: name,
       type: pick(rng, types),
       registeredLat: coords.lat + rangeFloat(rng, -0.005, 0.005),
@@ -289,7 +316,10 @@ async function seedEmployers() {
       jobsPosted: range(rng, 30, 400),
       paymentTimelinessRate: rangeFloat(rng, 0.85, 0.99),
       walletBalanceNaira: range(rng, 200_000, 2_500_000),
-      squadWalletId: `sqdw_${empId(i + 1).slice(4)}`,
+      squadWalletId: va.squadWalletId,
+      squadVirtualAccountNumber: va.squadVirtualAccountNumber,
+      squadVirtualAccountBankCode: va.squadVirtualAccountBankCode,
+      squadVirtualAccountName: va.squadVirtualAccountName,
       invoicingEmail: `${name.toLowerCase().replace(/[^a-z]/g, '')}.billing@example.ng`,
     });
   }
@@ -314,8 +344,10 @@ async function seedWorkers() {
     const monthsAgo = range(rng, 1, 11);
     const eligibility = score >= 80 ? 'pre_approved' : score >= 70 ? 'eligible' : 'ineligible';
     const skill = pick(rng, WORKER_SKILLS);
+    const id = wkrId(i + 1);
+    const va = stubVirtualAccount(id, fullName);
     rows.push({
-      id: wkrId(i + 1),
+      id,
       name: fullName,
       phoneNumber: phone(i + 1),
       photoUrl: null,
@@ -336,7 +368,10 @@ async function seedWorkers() {
       incomeVolatilityPct: rangeFloat(rng, 0.05, 0.25),
       averageWeeklyIncomeNaira: avgWeekly,
       eligibility,
-      squadWalletId: `sqdw_${wkrId(i + 1).slice(4)}`,
+      squadWalletId: va.squadWalletId,
+      squadVirtualAccountNumber: va.squadVirtualAccountNumber,
+      squadVirtualAccountBankCode: va.squadVirtualAccountBankCode,
+      squadVirtualAccountName: va.squadVirtualAccountName,
     });
   }
   // Story-graduate the first 3 workers.

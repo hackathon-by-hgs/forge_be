@@ -6,6 +6,7 @@ import { AuditService } from '../../common/audit/audit.service';
 import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { paginate } from '../../common/pagination/offset.dto';
+import { StreamPublisher } from '../stream/stream.publisher';
 import {
   ApproveLoanApplicationDto,
   LoanDto,
@@ -33,6 +34,7 @@ export class BankApplicationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly stream: StreamPublisher,
   ) {}
 
   async list(
@@ -74,8 +76,12 @@ export class BankApplicationsService {
       where: { id, bankId: bid },
       include: { worker: true, employer: true },
     });
-    if (!app) throw new AppError(404, 'NOT_FOUND', 'Loan application not found.');
-    return toLoanApplicationDto(app, toBorrowerSummary(app.borrowerType, app.worker, app.employer));
+    if (!app)
+      throw new AppError(404, 'NOT_FOUND', 'Loan application not found.');
+    return toLoanApplicationDto(
+      app,
+      toBorrowerSummary(app.borrowerType, app.worker, app.employer),
+    );
   }
 
   async approve(
@@ -89,7 +95,8 @@ export class BankApplicationsService {
       where: { id, bankId: bid },
       include: { worker: true, employer: true },
     });
-    if (!app) throw new AppError(404, 'NOT_FOUND', 'Loan application not found.');
+    if (!app)
+      throw new AppError(404, 'NOT_FOUND', 'Loan application not found.');
     if (app.status !== LoanApplicationStatus.Pending) {
       throw new AppError(
         409,
@@ -98,13 +105,15 @@ export class BankApplicationsService {
       );
     }
 
-    const principalNaira = body.principalNairaOverride ?? app.amountRequestedNaira;
+    const principalNaira =
+      body.principalNairaOverride ?? app.amountRequestedNaira;
     const apr = body.aprOverride ?? DEFAULT_APR;
     const termMonths = body.termMonthsOverride ?? app.termMonths;
     const now = new Date();
     const loanId = newId(ID_PREFIXES.loan);
 
-    const score = app.worker?.reliabilityScore ?? app.employer?.creditScore ?? 50;
+    const score =
+      app.worker?.reliabilityScore ?? app.employer?.creditScore ?? 50;
     const predicted = score >= 80 ? 0.97 : score >= 70 ? 0.9 : 0.75;
 
     const created = await this.prisma.$transaction(async (tx) => {
@@ -141,12 +150,30 @@ export class BankApplicationsService {
       action: 'bank.application_approve',
       entityType: 'loan_application',
       entityId: id,
-      before: { status: app.status, amountRequestedNaira: app.amountRequestedNaira },
-      after: { status: LoanApplicationStatus.Approved, loanId, principalNaira, apr, termMonths },
+      before: {
+        status: app.status,
+        amountRequestedNaira: app.amountRequestedNaira,
+      },
+      after: {
+        status: LoanApplicationStatus.Approved,
+        loanId,
+        principalNaira,
+        apr,
+        termMonths,
+      },
       request: req,
     });
 
-    return toLoanDto(created, toBorrowerSummary(created.borrowerType, created.worker, created.employer));
+    this.stream.publish({
+      scope: { kind: 'bank', id: bid },
+      event: 'application.decided',
+      data: { applicationId: id, decision: 'approved', loanId, principalNaira },
+    });
+
+    return toLoanDto(
+      created,
+      toBorrowerSummary(created.borrowerType, created.worker, created.employer),
+    );
   }
 
   async reject(
@@ -160,7 +187,8 @@ export class BankApplicationsService {
       where: { id, bankId: bid },
       include: { worker: true, employer: true },
     });
-    if (!app) throw new AppError(404, 'NOT_FOUND', 'Loan application not found.');
+    if (!app)
+      throw new AppError(404, 'NOT_FOUND', 'Loan application not found.');
     if (app.status !== LoanApplicationStatus.Pending) {
       throw new AppError(
         409,
@@ -186,6 +214,12 @@ export class BankApplicationsService {
       request: req,
     });
 
+    this.stream.publish({
+      scope: { kind: 'bank', id: bid },
+      event: 'application.decided',
+      data: { applicationId: id, decision: 'rejected', reason: body.reason },
+    });
+
     return toLoanApplicationDto(
       updated,
       toBorrowerSummary(updated.borrowerType, updated.worker, updated.employer),
@@ -195,7 +229,11 @@ export class BankApplicationsService {
   // ── Internals ────────────────────────────────────────────────────────────
   private requireScope(bankId: string | null): string {
     if (!bankId) {
-      throw new AppError(403, 'NO_BANK_SCOPE', 'This account is not bound to a bank.');
+      throw new AppError(
+        403,
+        'NO_BANK_SCOPE',
+        'This account is not bound to a bank.',
+      );
     }
     return bankId;
   }
@@ -207,7 +245,8 @@ export class BankApplicationsService {
     const where: Prisma.LoanApplicationWhereInput = { bankId };
     if (q.status) where.status = q.status;
     if (q.borrowerType) where.borrowerType = q.borrowerType;
-    if (q.recommendedDecision) where.recommendedDecision = q.recommendedDecision;
+    if (q.recommendedDecision)
+      where.recommendedDecision = q.recommendedDecision;
     if (q.q) {
       where.OR = [
         { id: { equals: q.q } },

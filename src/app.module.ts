@@ -28,6 +28,7 @@ import { EmployerWorkersModule } from './modules/employer-workers/employer-worke
 import { EmployerCreditModule } from './modules/employer-credit/employer-credit.module';
 import { EmployerAnalyticsModule } from './modules/employer-analytics/employer-analytics.module';
 import { LifecycleModule } from './modules/lifecycle/lifecycle.module';
+import { StreamModule } from './modules/stream/stream.module';
 
 @Module({
   imports: [
@@ -63,6 +64,9 @@ import { LifecycleModule } from './modules/lifecycle/lifecycle.module';
 
     // Hire→clock-out lifecycle automation (cron jobs).
     LifecycleModule,
+
+    // SSE /v1/stream — real-time invalidation hints for the dashboards.
+    StreamModule,
   ],
   controllers: [AppController],
   providers: [AppService],

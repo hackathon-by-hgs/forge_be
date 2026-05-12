@@ -7,6 +7,7 @@ import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { paginate } from '../../common/pagination/offset.dto';
 import { SquadClient } from '../squad/squad.client';
+import { StreamPublisher } from '../stream/stream.publisher';
 import {
   BankLoansListQueryDto,
   BankLoansListResponseDto,
@@ -18,7 +19,11 @@ import {
   LoanStatus,
   MarkRepaymentPaidDto,
 } from './dto/loans.dto';
-import { toBorrowerSummary, toLoanDto, toLoanRepaymentDto } from './bank.mapper';
+import {
+  toBorrowerSummary,
+  toLoanDto,
+  toLoanRepaymentDto,
+} from './bank.mapper';
 
 @Injectable()
 export class BankLoansService {
@@ -28,9 +33,13 @@ export class BankLoansService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly squad: SquadClient,
+    private readonly stream: StreamPublisher,
   ) {}
 
-  async list(bankId: string | null, q: BankLoansListQueryDto): Promise<BankLoansListResponseDto> {
+  async list(
+    bankId: string | null,
+    q: BankLoansListQueryDto,
+  ): Promise<BankLoansListResponseDto> {
     const bid = this.requireScope(bankId);
     const where = this.buildWhere(bid, q);
     const page = Math.max(1, q.page ?? 1);
@@ -48,7 +57,9 @@ export class BankLoansService {
     ]);
 
     return paginate<LoanDto>(
-      rows.map((l) => toLoanDto(l, toBorrowerSummary(l.borrowerType, l.worker, l.employer))),
+      rows.map((l) =>
+        toLoanDto(l, toBorrowerSummary(l.borrowerType, l.worker, l.employer)),
+      ),
       total,
       page,
       pageSize,
@@ -59,18 +70,29 @@ export class BankLoansService {
     const bid = this.requireScope(bankId);
     const loan = await this.prisma.loan.findFirst({
       where: { id: loanId, bankId: bid },
-      include: { worker: true, employer: true, repayments: { orderBy: { scheduledFor: 'asc' } } },
+      include: {
+        worker: true,
+        employer: true,
+        repayments: { orderBy: { scheduledFor: 'asc' } },
+      },
     });
     if (!loan) throw new AppError(404, 'NOT_FOUND', 'Loan not found.');
 
-    const base = toLoanDto(loan, toBorrowerSummary(loan.borrowerType, loan.worker, loan.employer));
-    const repayments: LoanRepaymentDto[] = loan.repayments.map(toLoanRepaymentDto);
+    const base = toLoanDto(
+      loan,
+      toBorrowerSummary(loan.borrowerType, loan.worker, loan.employer),
+    );
+    const repayments: LoanRepaymentDto[] =
+      loan.repayments.map(toLoanRepaymentDto);
     const totalPaidNaira = repayments
       .filter((r) => r.status === 'paid')
       .reduce((acc, r) => acc + r.amountNaira, 0);
-    const scheduled = repayments.filter((r) => r.status === 'paid' || r.status === 'missed');
+    const scheduled = repayments.filter(
+      (r) => r.status === 'paid' || r.status === 'missed',
+    );
     const paidCount = scheduled.filter((r) => r.status === 'paid').length;
-    const onTimeRepaymentRate = scheduled.length === 0 ? 0 : round2(paidCount / scheduled.length);
+    const onTimeRepaymentRate =
+      scheduled.length === 0 ? 0 : round2(paidCount / scheduled.length);
 
     return { ...base, repayments, totalPaidNaira, onTimeRepaymentRate };
   }
@@ -101,8 +123,10 @@ export class BankLoansService {
     const monthlyInstallment = Math.ceil(principalNaira / repaymentMonths);
 
     // Fire the Squad transfer for worker loans (worker has a linked bank
-    // account). Business loans land in the employer's Squad wallet — that
-    // path is a separate Phase 5 follow-up.
+    // account). Business loans credit the employer's in-app wallet directly —
+    // funds are already on Forge's balance sheet via the bank tenant, no
+    // external transfer needed. The credit happens inside the $transaction
+    // below so it's atomic with the loan-status flip.
     let squadReference: string | null = null;
     if (loan.workerId) {
       const account = await this.prisma.bankAccount.findFirst({
@@ -119,7 +143,9 @@ export class BankLoansService {
           remark: `Loan disbursement ${loanId}`,
         });
         if (!outcome.ok) {
-          this.logger.error(`[squad] disburse rejected for loan=${loanId}: ${outcome.message}`);
+          this.logger.error(
+            `[squad] disburse rejected for loan=${loanId}: ${outcome.message}`,
+          );
           throw new AppError(
             502,
             'PROVIDER_UNAVAILABLE',
@@ -127,7 +153,9 @@ export class BankLoansService {
           );
         }
       } else {
-        this.logger.warn(`[squad] no default bank account for worker=${loan.workerId} — loan disbursed without provider transfer`);
+        this.logger.warn(
+          `[squad] no default bank account for worker=${loan.workerId} — loan disbursed without provider transfer`,
+        );
       }
     }
 
@@ -162,6 +190,31 @@ export class BankLoansService {
             squadReference,
             status: 'processing',
           },
+        });
+      }
+      // Business borrowers: credit the employer's in-app wallet + write a
+      // `completed` Transaction row (no Squad transfer — internal book entry).
+      if (loan.employerId) {
+        const businessTxId = newId(ID_PREFIXES.transaction);
+        await tx.transaction.create({
+          data: {
+            id: businessTxId,
+            workerId: null,
+            employerId: loan.employerId,
+            kind: 'loan_disbursement',
+            amount: principalNaira,
+            timestamp: now,
+            title: 'Loan disbursed',
+            subtitle: `Loan ${loanId}`,
+            relatedJobId: null,
+            squadReference: `internal_${businessTxId.slice(4)}`,
+            status: 'completed',
+            settledAt: now,
+          },
+        });
+        await tx.employer.update({
+          where: { id: loan.employerId },
+          data: { walletBalanceNaira: { increment: principalNaira } },
         });
       }
       // Seed a repayment schedule. Demo-grade — Phase 5 will recompute as
@@ -208,11 +261,38 @@ export class BankLoansService {
       entityType: 'loan',
       entityId: loanId,
       before: { status: loan.status, principalNaira: loan.principal },
-      after: { status: LoanStatus.Active, principalNaira, disbursedAt: now.toISOString() },
+      after: {
+        status: LoanStatus.Active,
+        principalNaira,
+        disbursedAt: now.toISOString(),
+      },
       request: req,
     });
 
-    return toLoanDto(updated, toBorrowerSummary(updated.borrowerType, updated.worker, updated.employer));
+    this.stream.publish({
+      scope: { kind: 'bank', id: bid },
+      event: 'loan.disbursed',
+      data: { loanId, principalNaira, borrowerType: loan.borrowerType },
+    });
+
+    // For business borrowers, tell the employer dashboard too so the wallet
+    // tile + transactions table refresh without polling.
+    if (loan.employerId) {
+      this.stream.publish({
+        scope: { kind: 'employer', id: loan.employerId },
+        event: 'transaction.updated',
+        data: {
+          status: 'completed',
+          amountNaira: principalNaira,
+          source: 'loan_disbursement',
+        },
+      });
+    }
+
+    return toLoanDto(
+      updated,
+      toBorrowerSummary(updated.borrowerType, updated.worker, updated.employer),
+    );
   }
 
   async markRepaymentPaid(
@@ -226,9 +306,14 @@ export class BankLoansService {
       where: { id: repaymentId, loan: { bankId: bid } },
       include: { loan: true },
     });
-    if (!repayment) throw new AppError(404, 'NOT_FOUND', 'Repayment not found.');
+    if (!repayment)
+      throw new AppError(404, 'NOT_FOUND', 'Repayment not found.');
     if (repayment.status === 'paid') {
-      throw new AppError(409, 'INVALID_STATE', 'This repayment is already marked paid.');
+      throw new AppError(
+        409,
+        'INVALID_STATE',
+        'This repayment is already marked paid.',
+      );
     }
     if (!['active', 'at_risk'].includes(repayment.loan.status)) {
       throw new AppError(
@@ -240,7 +325,10 @@ export class BankLoansService {
 
     const amount = body.amountNairaOverride ?? repayment.amount;
     const now = new Date();
-    const newOutstanding = Math.max(0, repayment.loan.outstandingBalance - amount);
+    const newOutstanding = Math.max(
+      0,
+      repayment.loan.outstandingBalance - amount,
+    );
     const allPaid = newOutstanding === 0;
 
     const updated = await this.prisma.$transaction(async (tx) => {
@@ -288,9 +376,24 @@ export class BankLoansService {
       action: 'bank.loan_repayment_paid',
       entityType: 'loan_repayment',
       entityId: repaymentId,
-      before: { status: repayment.status, outstandingNaira: repayment.loan.outstandingBalance },
+      before: {
+        status: repayment.status,
+        outstandingNaira: repayment.loan.outstandingBalance,
+      },
       after: { status: 'paid', outstandingNaira: newOutstanding, allPaid },
       request: req,
+    });
+
+    this.stream.publish({
+      scope: { kind: 'bank', id: bid },
+      event: 'loan.repayment_paid',
+      data: {
+        loanId: repayment.loanId,
+        repaymentId,
+        amountNaira: amount,
+        outstandingNaira: newOutstanding,
+        allPaid,
+      },
     });
 
     return toLoanRepaymentDto(updated);
@@ -299,12 +402,19 @@ export class BankLoansService {
   // ── Internals ────────────────────────────────────────────────────────────
   private requireScope(bankId: string | null): string {
     if (!bankId) {
-      throw new AppError(403, 'NO_BANK_SCOPE', 'This account is not bound to a bank.');
+      throw new AppError(
+        403,
+        'NO_BANK_SCOPE',
+        'This account is not bound to a bank.',
+      );
     }
     return bankId;
   }
 
-  private buildWhere(bankId: string, q: BankLoansListQueryDto): Prisma.LoanWhereInput {
+  private buildWhere(
+    bankId: string,
+    q: BankLoansListQueryDto,
+  ): Prisma.LoanWhereInput {
     const where: Prisma.LoanWhereInput = { bankId };
     if (q.riskLevel) where.riskLevel = q.riskLevel;
     if (q.status) where.status = q.status;

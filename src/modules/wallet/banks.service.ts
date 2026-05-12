@@ -1,7 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
+import { SquadClient } from '../squad/squad.client';
 import {
   BankAccountDto,
   LinkBankAccountDto,
@@ -10,7 +11,12 @@ import {
 
 @Injectable()
 export class BanksService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(BanksService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly squad: SquadClient,
+  ) {}
 
   async listBanks() {
     const items = await this.prisma.nibssBank.findMany({ orderBy: { name: 'asc' } });
@@ -18,9 +24,10 @@ export class BanksService {
   }
 
   /**
-   * NIBSS resolve. In production this hits Squad's `/transfer/account/lookup`;
-   * here we accept any 10-digit number and synthesise a name. Real provider
-   * wiring is a swap of this method only.
+   * NIBSS account-name resolve. Hits Squad's `/transfer/account/lookup` (or
+   * the stub equivalent in dev). Used by the worker-mobile bank-add flow to
+   * verify the account before linking + fuzzy-match the name to the worker's
+   * profile.
    */
   async resolve(workerId: string, body: ResolveBankDto) {
     void workerId;
@@ -28,8 +35,21 @@ export class BanksService {
     if (!bank) {
       throw new AppError(400, 'VALIDATION_FAILED', 'Unknown bank code.');
     }
-    // TODO: rate-limit at 10/minute per worker.
-    return { account_name: 'TEST ACCOUNT NAME' };
+    try {
+      const outcome = await this.squad.resolveAccount({
+        bankCode: body.bank_code,
+        accountNumber: body.account_number,
+      });
+      return { account_name: outcome.accountName };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[bank-resolve] squad lookup failed: ${msg}`);
+      throw new AppError(
+        422,
+        'ACCOUNT_RESOLVE_FAILED',
+        'We could not look up that account. Check the number and try again.',
+      );
+    }
   }
 
   async listMine(workerId: string): Promise<{ items: BankAccountDto[] }> {

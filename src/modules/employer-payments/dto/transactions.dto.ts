@@ -39,8 +39,13 @@ export class TransactionDto {
   @ApiProperty({ example: 'emp_0001' })
   employerId!: string;
 
-  @ApiProperty({ example: 'wkr_0042' })
-  workerId!: string;
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 'wkr_0042',
+    description:
+      'Null for top-up rows (incoming virtual-account credits) — those rows have no worker counterparty.',
+  })
+  workerId?: string | null;
 
   @ApiPropertyOptional({ nullable: true, example: 'Tunde Adeyemi' })
   workerName?: string | null;
@@ -48,7 +53,10 @@ export class TransactionDto {
   @ApiPropertyOptional({ nullable: true, example: 'job_00123' })
   jobId?: string | null;
 
-  @ApiPropertyOptional({ nullable: true, example: 'Trailer offload, Apapa wharf' })
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 'Trailer offload, Apapa wharf',
+  })
   jobTitle?: string | null;
 
   @ApiProperty({ example: 5000, description: 'Integer Naira.' })
@@ -78,13 +86,17 @@ export class TransactionsListQueryDto {
   @IsDateString()
   from?: string;
 
-  @ApiPropertyOptional({ example: '2026-06-01', description: 'Exclusive upper bound.' })
+  @ApiPropertyOptional({
+    example: '2026-06-01',
+    description: 'Exclusive upper bound.',
+  })
   @IsOptional()
   @IsDateString()
   to?: string;
 
   @ApiPropertyOptional({
-    description: 'Matches worker name + Squad reference + job ID + transaction ID.',
+    description:
+      'Matches worker name + Squad reference + job ID + transaction ID.',
   })
   @IsOptional()
   @IsString()
@@ -110,19 +122,36 @@ export class TransactionsListResponseDto {
 }
 
 export class TransactionsSummaryDto {
-  @ApiProperty({ example: 450000, description: 'Total amount of `completed` transactions issued this calendar month.' })
+  @ApiProperty({
+    example: 450000,
+    description:
+      'Total amount of `completed` transactions issued this calendar month.',
+  })
   paidThisMonthNaira!: number;
 
-  @ApiProperty({ example: 4, description: 'Count of currently `pending` or `processing` transactions.' })
+  @ApiProperty({
+    example: 4,
+    description: 'Count of currently `pending` or `processing` transactions.',
+  })
   pendingCount!: number;
 
-  @ApiProperty({ example: 75000, description: 'Sum of amounts for those pending/processing transactions.' })
+  @ApiProperty({
+    example: 75000,
+    description: 'Sum of amounts for those pending/processing transactions.',
+  })
   pendingAmountNaira!: number;
 
-  @ApiProperty({ example: 5200, description: 'Average amountNaira across this employer\'s `completed` transactions in the last 90 days.' })
+  @ApiProperty({
+    example: 5200,
+    description:
+      "Average amountNaira across this employer's `completed` transactions in the last 90 days.",
+  })
   averageJobCostNaira!: number;
 
-  @ApiProperty({ example: 12000, description: 'Largest single completed payment in the last 90 days.' })
+  @ApiProperty({
+    example: 12000,
+    description: 'Largest single completed payment in the last 90 days.',
+  })
   largestPaymentNaira!: number;
 }
 
@@ -137,7 +166,10 @@ export class CreateManualTransactionDto {
   @Min(100)
   amountNaira!: number;
 
-  @ApiPropertyOptional({ example: 'job_00123', description: 'Optional — link this transfer to a specific job.' })
+  @ApiPropertyOptional({
+    example: 'job_00123',
+    description: 'Optional — link this transfer to a specific job.',
+  })
   @IsOptional()
   @IsString()
   jobId?: string;

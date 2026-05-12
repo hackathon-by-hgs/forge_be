@@ -9,7 +9,10 @@ export class MetricTileDto {
   @ApiProperty({ example: 28 })
   value!: number;
 
-  @ApiProperty({ example: 12.5, description: 'Percent change vs. the prior comparable period.' })
+  @ApiProperty({
+    example: 12.5,
+    description: 'Percent change vs. the prior comparable period.',
+  })
   deltaPct!: number;
 
   @ApiProperty({
@@ -46,7 +49,13 @@ export class LiveJobPinDto {
 
   @ApiProperty({
     example: 'in_progress',
-    enum: ['open', 'applications_in', 'accepted', 'in_progress', 'pending_verification'],
+    enum: [
+      'open',
+      'applications_in',
+      'accepted',
+      'in_progress',
+      'pending_verification',
+    ],
   })
   status!: string;
 }
@@ -73,22 +82,61 @@ export class SpendDayDto {
   amountNaira!: number;
 }
 
+export class VirtualAccountDto {
+  @ApiProperty({
+    example: '9912345678',
+    description:
+      '10-digit NUBAN external banks can transfer into to fund the wallet.',
+  })
+  number!: string;
+
+  @ApiProperty({
+    example: '058',
+    description: 'NIBSS bank code Squad assigned to this virtual account.',
+  })
+  bankCode!: string;
+
+  @ApiProperty({
+    example: 'Forge Test Tunde Adeyemi',
+    description: 'Display name external depositors see at their bank.',
+  })
+  accountName!: string;
+}
+
 export class CashPositionDto {
   @ApiProperty({ example: 845000 })
   walletBalanceNaira!: number;
 
-  @ApiProperty({ example: 320000, description: 'Linear projection of the next 7 days based on recent spend.' })
+  @ApiProperty({
+    example: 320000,
+    description: 'Linear projection of the next 7 days based on recent spend.',
+  })
   projectedWeeklySpendNaira!: number;
 
-  @ApiProperty({ type: [SpendDayDto], description: 'Last 7 days of completed payments.' })
+  @ApiProperty({
+    type: [SpendDayDto],
+    description: 'Last 7 days of completed payments.',
+  })
   spendTrend7d!: SpendDayDto[];
+
+  @ApiPropertyOptional({
+    type: VirtualAccountDto,
+    nullable: true,
+    description:
+      'Squad virtual NUBAN for funding this wallet. Null while provisioning pending or failed (lazy-retry on next overview hit).',
+  })
+  virtualAccount!: VirtualAccountDto | null;
 }
 
 export class CreditFactorDto {
   @ApiProperty({ example: 'Payment timeliness' })
   label!: string;
 
-  @ApiProperty({ example: 12, description: 'Points contributed (positive) or lost (negative) since last refresh.' })
+  @ApiProperty({
+    example: 12,
+    description:
+      'Points contributed (positive) or lost (negative) since last refresh.',
+  })
   deltaPoints!: number;
 }
 
@@ -135,7 +183,10 @@ export class EmployerOverviewDto {
   @ApiProperty({ type: OverviewMetricsDto })
   metrics!: OverviewMetricsDto;
 
-  @ApiProperty({ type: [LiveJobPinDto], description: 'Up to 50 active job pins for the live operations map.' })
+  @ApiProperty({
+    type: [LiveJobPinDto],
+    description: 'Up to 50 active job pins for the live operations map.',
+  })
   liveJobs!: LiveJobPinDto[];
 
   @ApiProperty({ type: [AttentionItemDto] })
@@ -147,6 +198,9 @@ export class EmployerOverviewDto {
   @ApiProperty({ type: CreditHealthDto })
   creditHealth!: CreditHealthDto;
 
-  @ApiProperty({ type: [StartingSoonJobDto], description: 'Next 4 jobs scheduled to start.' })
+  @ApiProperty({
+    type: [StartingSoonJobDto],
+    description: 'Next 4 jobs scheduled to start.',
+  })
   startingSoon!: StartingSoonJobDto[];
 }

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { EmployerCreditHistory as EmployerCreditHistoryRow } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppError } from '../../common/utils/app-error';
 import { LoanRiskLevel, LoanStatus } from '../bank/dto/loans.dto';
@@ -12,13 +13,19 @@ import {
   EmployerScoreHistoryDto,
   ScorePointDto,
 } from './dto/credit.dto';
+import {
+  computeFactorValues,
+  FACTOR_WEIGHTS as RAW_FACTOR_WEIGHTS,
+} from './employer-credit.factors';
 
 const FACTOR_WEIGHTS: Record<EmployerCreditFactorKey, number> = {
-  [EmployerCreditFactorKey.PaymentTimeliness]: 0.4,
-  [EmployerCreditFactorKey.WorkerRetention]: 0.2,
-  [EmployerCreditFactorKey.TransactionConsistency]: 0.2,
-  [EmployerCreditFactorKey.GrowthTrend]: 0.1,
-  [EmployerCreditFactorKey.TimeOnPlatform]: 0.1,
+  [EmployerCreditFactorKey.PaymentTimeliness]:
+    RAW_FACTOR_WEIGHTS.paymentTimeliness,
+  [EmployerCreditFactorKey.WorkerRetention]: RAW_FACTOR_WEIGHTS.workerRetention,
+  [EmployerCreditFactorKey.TransactionConsistency]:
+    RAW_FACTOR_WEIGHTS.transactionConsistency,
+  [EmployerCreditFactorKey.GrowthTrend]: RAW_FACTOR_WEIGHTS.growthTrend,
+  [EmployerCreditFactorKey.TimeOnPlatform]: RAW_FACTOR_WEIGHTS.timeOnPlatform,
 };
 
 const FACTOR_LABEL: Record<EmployerCreditFactorKey, string> = {
@@ -57,8 +64,13 @@ export class EmployerCreditService {
 
     const score = employer.creditScore;
 
-    const [factors, activeLoanRow, pastLoanRows] = await Promise.all([
+    const [factors, history, activeLoanRow, pastLoanRows] = await Promise.all([
       this.computeFactors(eid, employer),
+      this.prisma.employerCreditHistory.findMany({
+        where: { employerId: eid },
+        orderBy: { capturedAt: 'desc' },
+        take: 12 * 7, // up to ~12 weeks of daily rows
+      }),
       this.prisma.loan.findFirst({
         where: { employerId: eid, status: { in: ACTIVE_LOAN_STATUSES } },
         include: { bank: { select: { name: true } } },
@@ -71,15 +83,21 @@ export class EmployerCreditService {
       }),
     ]);
 
-    const eligibility = computeEligibility(score, employer.totalLaborSpendNaira);
+    const eligibility = computeEligibility(
+      score,
+      employer.totalLaborSpendNaira,
+    );
+    const { trend12Week, scoreDeltaPoints } = this.weeklyTrendFromHistory(
+      history,
+      score,
+    );
+    const factorsWithTrend = this.attachFactorTrends(factors, history);
 
     return {
       score,
-      // Until the score-recalc cron writes history rows, we have no real delta.
-      // Surface 0 explicitly so the FE knows not to render a misleading arrow.
-      scoreDeltaPoints: 0,
-      trend12Week: syntheticWeeklyTrend(score, 12),
-      factors,
+      scoreDeltaPoints,
+      trend12Week,
+      factors: factorsWithTrend,
       eligibility,
       activeLoan: activeLoanRow ? this.toLoanSummary(activeLoanRow) : null,
       pastLoans: pastLoanRows.map((l) => this.toLoanSummary(l)),
@@ -87,7 +105,9 @@ export class EmployerCreditService {
   }
 
   // ── GET /v1/employer/credit/score-history ───────────────────────────────
-  async scoreHistory(employerId: string | null): Promise<EmployerScoreHistoryDto> {
+  async scoreHistory(
+    employerId: string | null,
+  ): Promise<EmployerScoreHistoryDto> {
     const eid = this.requireScope(employerId);
     const employer = await this.prisma.employer.findUnique({
       where: { id: eid },
@@ -96,11 +116,26 @@ export class EmployerCreditService {
     if (!employer) {
       throw new AppError(404, 'NOT_FOUND', 'Employer not found.');
     }
-    // Synthetic 12 monthly snapshots until score-recalc cron writes history.
-    return { data: syntheticMonthlyHistory(employer.creditScore, 12) };
+    // Real 12 monthly snapshots when the score-recalc cron has run; fall back
+    // to synthetic for employers without history yet.
+    const history = await this.prisma.employerCreditHistory.findMany({
+      where: { employerId: eid },
+      orderBy: { capturedAt: 'desc' },
+      take: 365,
+    });
+    if (history.length === 0) {
+      return { data: syntheticMonthlyHistory(employer.creditScore, 12) };
+    }
+    return { data: monthlyHistoryFromRows(history, 12) };
   }
 
   // ── Factor computation (BRIEF §11.7) ────────────────────────────────────
+  /**
+   * Builds the DTO-shaped factor list. Factor *values* and the underlying
+   * stats come from the shared helper (so the cron and the live read agree
+   * byte-for-byte). Trends are attached later from EmployerCreditHistory
+   * once the score-recalc cron has run.
+   */
   private async computeFactors(
     employerId: string,
     employer: {
@@ -108,113 +143,180 @@ export class EmployerCreditService {
       joinedAt: Date;
     },
   ): Promise<EmployerCreditFactorDto[]> {
-    const now = new Date();
-    const ninetyDaysAgo = new Date(now.getTime() - 90 * 86_400_000);
+    const v = await computeFactorValues(this.prisma, employerId, employer);
+    const {
+      repeatWorkers,
+      totalWorkers,
+      weeklyOutflowBuckets,
+      recentJobsLast30,
+      priorJobsPrior30,
+      monthsOnPlatform,
+    } = v.diagnostics;
 
-    // Worker retention: distinct workers who completed ≥ 2 jobs for this employer
-    // divided by distinct workers who completed any job for this employer.
-    const completedApps = await this.prisma.jobApplication.findMany({
-      where: { status: 'completed', job: { employerId } },
-      select: { workerId: true, completedAt: true, job: { select: { payAmount: true } } },
-    });
-    const completionsByWorker = new Map<string, number>();
-    for (const a of completedApps) {
-      completionsByWorker.set(a.workerId, (completionsByWorker.get(a.workerId) ?? 0) + 1);
-    }
-    const totalWorkers = completionsByWorker.size;
-    const repeatWorkers = Array.from(completionsByWorker.values()).filter((n) => n >= 2).length;
-    const workerRetention = totalWorkers > 0 ? repeatWorkers / totalWorkers : 0;
-
-    // Transaction consistency: 1 - coefficient of variation of weekly outflows
-    // over the last 90 days. Higher when spend is steady, lower when spiky.
-    const weeklyTotals = aggregateWeeklyOutflows(completedApps, ninetyDaysAgo, now);
-    const transactionConsistency = computeConsistency(weeklyTotals);
-
-    // Growth trend: ratio of jobs posted in the last 30 days to the prior 30 days.
-    // Clamped to 0..1 so a doubling-or-better caps at 1.
-    const last30 = new Date(now.getTime() - 30 * 86_400_000);
-    const prior30 = new Date(now.getTime() - 60 * 86_400_000);
-    const [recentJobs, priorJobs] = await Promise.all([
-      this.prisma.job.count({ where: { employerId, createdAt: { gte: last30 } } }),
-      this.prisma.job.count({ where: { employerId, createdAt: { gte: prior30, lt: last30 } } }),
-    ]);
-    const growthTrend = computeGrowthTrend(recentJobs, priorJobs);
-
-    // Time on platform: min(1, months since joinedAt / 12).
-    const monthsOn = Math.max(0, (now.getTime() - employer.joinedAt.getTime()) / (30 * 86_400_000));
-    const timeOnPlatform = Math.min(1, monthsOn / 12);
-
-    const paymentTimeliness = clamp01(employer.paymentTimelinessRate);
-
-    const factors: EmployerCreditFactorDto[] = [
+    return [
       {
         key: EmployerCreditFactorKey.PaymentTimeliness,
         label: FACTOR_LABEL[EmployerCreditFactorKey.PaymentTimeliness],
-        value: round2(paymentTimeliness),
+        value: v.paymentTimeliness,
         weight: FACTOR_WEIGHTS[EmployerCreditFactorKey.PaymentTimeliness],
-        trend: syntheticFactorTrend(paymentTimeliness, 12),
-        rationale: paymentTimelinessRationale(paymentTimeliness),
+        trend: syntheticFactorTrend(v.paymentTimeliness, 12),
+        rationale: paymentTimelinessRationale(v.paymentTimeliness),
       },
       {
         key: EmployerCreditFactorKey.WorkerRetention,
         label: FACTOR_LABEL[EmployerCreditFactorKey.WorkerRetention],
-        value: round2(workerRetention),
+        value: v.workerRetention,
         weight: FACTOR_WEIGHTS[EmployerCreditFactorKey.WorkerRetention],
-        trend: syntheticFactorTrend(workerRetention, 12),
+        trend: syntheticFactorTrend(v.workerRetention, 12),
         rationale: workerRetentionRationale(repeatWorkers, totalWorkers),
       },
       {
         key: EmployerCreditFactorKey.TransactionConsistency,
         label: FACTOR_LABEL[EmployerCreditFactorKey.TransactionConsistency],
-        value: round2(transactionConsistency),
+        value: v.transactionConsistency,
         weight: FACTOR_WEIGHTS[EmployerCreditFactorKey.TransactionConsistency],
-        trend: syntheticFactorTrend(transactionConsistency, 12),
-        rationale: transactionConsistencyRationale(transactionConsistency, weeklyTotals.length),
+        trend: syntheticFactorTrend(v.transactionConsistency, 12),
+        rationale: transactionConsistencyRationale(
+          v.transactionConsistency,
+          weeklyOutflowBuckets,
+        ),
       },
       {
         key: EmployerCreditFactorKey.GrowthTrend,
         label: FACTOR_LABEL[EmployerCreditFactorKey.GrowthTrend],
-        value: round2(growthTrend),
+        value: v.growthTrend,
         weight: FACTOR_WEIGHTS[EmployerCreditFactorKey.GrowthTrend],
-        trend: syntheticFactorTrend(growthTrend, 12),
-        rationale: growthTrendRationale(recentJobs, priorJobs),
+        trend: syntheticFactorTrend(v.growthTrend, 12),
+        rationale: growthTrendRationale(recentJobsLast30, priorJobsPrior30),
       },
       {
         key: EmployerCreditFactorKey.TimeOnPlatform,
         label: FACTOR_LABEL[EmployerCreditFactorKey.TimeOnPlatform],
-        value: round2(timeOnPlatform),
+        value: v.timeOnPlatform,
         weight: FACTOR_WEIGHTS[EmployerCreditFactorKey.TimeOnPlatform],
-        trend: syntheticFactorTrend(timeOnPlatform, 12),
-        rationale: timeOnPlatformRationale(monthsOn),
+        trend: syntheticFactorTrend(v.timeOnPlatform, 12),
+        rationale: timeOnPlatformRationale(monthsOnPlatform),
       },
     ];
+  }
 
-    return factors;
+  /**
+   * Build the 12-week trend from real history rows when present, else fall
+   * back to the synthetic ramp anchored at `currentScore`. `scoreDeltaPoints`
+   * is `today - 7-days-ago` once we have a row from a week back, otherwise 0.
+   */
+  private weeklyTrendFromHistory(
+    history: EmployerCreditHistoryRow[],
+    currentScore: number,
+  ): { trend12Week: ScorePointDto[]; scoreDeltaPoints: number } {
+    if (history.length === 0) {
+      return {
+        trend12Week: syntheticWeeklyTrend(currentScore, 12),
+        scoreDeltaPoints: 0,
+      };
+    }
+    // history is ordered DESC by capturedAt; pick the latest row per ISO week.
+    const byWeek = new Map<string, EmployerCreditHistoryRow>();
+    for (const row of history) {
+      const key = isoWeekKey(row.capturedAt);
+      if (!byWeek.has(key)) byWeek.set(key, row);
+    }
+    const now = new Date();
+    const trend: ScorePointDto[] = [];
+    for (let i = 11; i >= 0; i--) {
+      const weekStart = new Date(now.getTime() - i * 7 * 86_400_000);
+      const key = isoWeekKey(weekStart);
+      const row = byWeek.get(key);
+      trend.push({
+        date: weekStart.toISOString().slice(0, 10),
+        score: row?.score ?? currentScore,
+      });
+    }
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 86_400_000);
+    const priorRow = history.find(
+      (r) => r.capturedAt.getTime() <= sevenDaysAgo.getTime(),
+    );
+    const scoreDeltaPoints = priorRow ? currentScore - priorRow.score : 0;
+    return { trend12Week: trend, scoreDeltaPoints };
+  }
+
+  /**
+   * Replace each factor's synthetic `trend[]` with real per-factor weekly
+   * values when history rows exist; otherwise leave the synthetic value in place.
+   */
+  private attachFactorTrends(
+    factors: EmployerCreditFactorDto[],
+    history: EmployerCreditHistoryRow[],
+  ): EmployerCreditFactorDto[] {
+    if (history.length === 0) return factors;
+    const byWeek = new Map<string, EmployerCreditHistoryRow>();
+    for (const row of history) {
+      const key = isoWeekKey(row.capturedAt);
+      if (!byWeek.has(key)) byWeek.set(key, row);
+    }
+    const now = new Date();
+    const weekRows: (EmployerCreditHistoryRow | null)[] = [];
+    for (let i = 11; i >= 0; i--) {
+      const weekStart = new Date(now.getTime() - i * 7 * 86_400_000);
+      weekRows.push(byWeek.get(isoWeekKey(weekStart)) ?? null);
+    }
+    const pickField = (
+      key: EmployerCreditFactorKey,
+    ): keyof Pick<
+      EmployerCreditHistoryRow,
+      | 'paymentTimeliness'
+      | 'workerRetention'
+      | 'transactionConsistency'
+      | 'growthTrend'
+      | 'timeOnPlatform'
+    > => {
+      switch (key) {
+        case EmployerCreditFactorKey.PaymentTimeliness:
+          return 'paymentTimeliness';
+        case EmployerCreditFactorKey.WorkerRetention:
+          return 'workerRetention';
+        case EmployerCreditFactorKey.TransactionConsistency:
+          return 'transactionConsistency';
+        case EmployerCreditFactorKey.GrowthTrend:
+          return 'growthTrend';
+        case EmployerCreditFactorKey.TimeOnPlatform:
+          return 'timeOnPlatform';
+      }
+    };
+    return factors.map((f) => {
+      const field = pickField(f.key);
+      const trend = weekRows.map((row) =>
+        row ? Math.round(row[field] * 100) / 100 : f.value,
+      );
+      return { ...f, trend };
+    });
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────
   private requireScope(employerId: string | null): string {
     if (!employerId) {
-      throw new AppError(403, 'NO_EMPLOYER_SCOPE', 'This account is not bound to a business.');
+      throw new AppError(
+        403,
+        'NO_EMPLOYER_SCOPE',
+        'This account is not bound to a business.',
+      );
     }
     return employerId;
   }
 
-  private toLoanSummary(
-    loan: {
-      id: string;
-      status: string;
-      principal: number;
-      outstandingBalance: number;
-      apr: number;
-      termMonths: number | null;
-      disbursedAt: Date | null;
-      nextPaymentDueAt: Date | null;
-      expectedFullRepaymentAt: Date | null;
-      riskLevel: string;
-      bank: { name: string } | null;
-    },
-  ): EmployerLoanSummaryDto {
+  private toLoanSummary(loan: {
+    id: string;
+    status: string;
+    principal: number;
+    outstandingBalance: number;
+    apr: number;
+    termMonths: number | null;
+    disbursedAt: Date | null;
+    nextPaymentDueAt: Date | null;
+    expectedFullRepaymentAt: Date | null;
+    riskLevel: string;
+    bank: { name: string } | null;
+  }): EmployerLoanSummaryDto {
     return {
       id: loan.id,
       status: loan.status as LoanStatus,
@@ -223,8 +325,12 @@ export class EmployerCreditService {
       apr: loan.apr,
       termMonths: loan.termMonths,
       disbursedAt: loan.disbursedAt ? loan.disbursedAt.toISOString() : null,
-      nextPaymentDueAt: loan.nextPaymentDueAt ? loan.nextPaymentDueAt.toISOString() : null,
-      expectedFullRepaymentAt: loan.expectedFullRepaymentAt ? loan.expectedFullRepaymentAt.toISOString() : null,
+      nextPaymentDueAt: loan.nextPaymentDueAt
+        ? loan.nextPaymentDueAt.toISOString()
+        : null,
+      expectedFullRepaymentAt: loan.expectedFullRepaymentAt
+        ? loan.expectedFullRepaymentAt.toISOString()
+        : null,
       bankName: loan.bank?.name ?? null,
       riskLevel: (loan.riskLevel as LoanRiskLevel) ?? LoanRiskLevel.Green,
     };
@@ -254,18 +360,27 @@ function syntheticWeeklyTrend(current: number, weeks: number): ScorePointDto[] {
     const d = new Date(now.getTime() - i * 7 * 86_400_000);
     // Drift down 0–2 points further back in time so today is the apex; bounded 0..100.
     const drift = Math.round((i / Math.max(1, weeks - 1)) * 2);
-    out.push({ date: d.toISOString().slice(0, 10), score: Math.max(0, Math.min(100, current - drift)) });
+    out.push({
+      date: d.toISOString().slice(0, 10),
+      score: Math.max(0, Math.min(100, current - drift)),
+    });
   }
   return out;
 }
 
-function syntheticMonthlyHistory(current: number, months: number): ScorePointDto[] {
+function syntheticMonthlyHistory(
+  current: number,
+  months: number,
+): ScorePointDto[] {
   const out: ScorePointDto[] = [];
   const now = new Date();
   for (let i = months - 1; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const drift = Math.round((i / Math.max(1, months - 1)) * 4);
-    out.push({ date: d.toISOString().slice(0, 10), score: Math.max(0, Math.min(100, current - drift)) });
+    out.push({
+      date: d.toISOString().slice(0, 10),
+      score: Math.max(0, Math.min(100, current - drift)),
+    });
   }
   return out;
 }
@@ -279,45 +394,58 @@ function syntheticFactorTrend(current: number, periods: number): number[] {
   return out;
 }
 
-function aggregateWeeklyOutflows(
-  apps: { completedAt: Date | null; job: { payAmount: number } }[],
-  start: Date,
-  end: Date,
-): number[] {
-  const weeks = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (7 * 86_400_000)));
-  const buckets = new Array<number>(weeks).fill(0);
-  for (const a of apps) {
-    if (!a.completedAt) continue;
-    const t = a.completedAt.getTime();
-    if (t < start.getTime() || t > end.getTime()) continue;
-    const idx = Math.min(weeks - 1, Math.floor((t - start.getTime()) / (7 * 86_400_000)));
-    buckets[idx] += a.job.payAmount;
+/**
+ * Pick the row closest to the first of each month for the last `months`
+ * months. Falls through to "no entry for that month" → omitted, which the
+ * FE renders as a gap.
+ */
+function monthlyHistoryFromRows(
+  rows: EmployerCreditHistoryRow[],
+  months: number,
+): ScorePointDto[] {
+  const byMonth = new Map<string, EmployerCreditHistoryRow>();
+  // rows are DESC by capturedAt; first seen for each month wins (latest in month).
+  for (const r of rows) {
+    const key = `${r.capturedAt.getUTCFullYear()}-${String(r.capturedAt.getUTCMonth() + 1).padStart(2, '0')}`;
+    if (!byMonth.has(key)) byMonth.set(key, r);
   }
-  return buckets;
+  const now = new Date();
+  const out: ScorePointDto[] = [];
+  for (let i = months - 1; i >= 0; i--) {
+    const ref = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1),
+    );
+    const key = `${ref.getUTCFullYear()}-${String(ref.getUTCMonth() + 1).padStart(2, '0')}`;
+    const row = byMonth.get(key);
+    if (row) {
+      out.push({ date: ref.toISOString().slice(0, 10), score: row.score });
+    }
+  }
+  return out;
 }
 
-function computeConsistency(buckets: number[]): number {
-  if (buckets.length === 0) return 0;
-  const mean = buckets.reduce((a, b) => a + b, 0) / buckets.length;
-  if (mean === 0) return 0;
-  const variance =
-    buckets.reduce((acc, v) => acc + (v - mean) ** 2, 0) / buckets.length;
-  const stddev = Math.sqrt(variance);
-  // 1 - CV, clamped 0..1. Lower CV = more consistent spend = higher score.
-  return clamp01(1 - stddev / mean);
-}
-
-function computeGrowthTrend(recent: number, prior: number): number {
-  if (prior === 0) {
-    // First-month employer or quiet period — neutral score so we don't double-count
-    // a "new business" signal that's already in `time_on_platform`.
-    return recent > 0 ? 0.5 : 0.3;
-  }
-  return clamp01(recent / (2 * prior));
+/**
+ * Key a date by its ISO week (Mon-anchored, UTC). Used to bucket history rows
+ * onto the weekly trend rail. We pick "Monday of week N of year Y".
+ */
+function isoWeekKey(d: Date): string {
+  const date = new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
+  );
+  const dayNum = date.getUTCDay() === 0 ? 7 : date.getUTCDay();
+  date.setUTCDate(date.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil(
+    ((date.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7,
+  );
+  return `${date.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
 }
 
 /** BRIEF §11.8: ≥80 pre_approved (3× monthly avg), 70–79 eligible (2×), <70 ineligible. */
-function computeEligibility(score: number, totalSpendNaira: number): EmployerEligibilityDto {
+function computeEligibility(
+  score: number,
+  totalSpendNaira: number,
+): EmployerEligibilityDto {
   const monthlyAvg = Math.max(0, Math.round(totalSpendNaira / 12));
   if (score >= 80) {
     return {
@@ -364,15 +492,20 @@ function transactionConsistencyRationale(value: number, weeks: number): string {
 }
 
 function growthTrendRationale(recent: number, prior: number): string {
-  if (prior === 0 && recent === 0) return 'No recent posting activity to compare.';
-  if (prior === 0) return `New activity — ${recent} job(s) in the last 30 days.`;
+  if (prior === 0 && recent === 0)
+    return 'No recent posting activity to compare.';
+  if (prior === 0)
+    return `New activity — ${recent} job(s) in the last 30 days.`;
   const ratio = recent / prior;
-  if (ratio >= 1.5) return `Growing fast: ${recent} jobs vs ${prior} the prior 30 days.`;
-  if (ratio >= 1) return `Stable: ${recent} jobs vs ${prior} the prior 30 days.`;
+  if (ratio >= 1.5)
+    return `Growing fast: ${recent} jobs vs ${prior} the prior 30 days.`;
+  if (ratio >= 1)
+    return `Stable: ${recent} jobs vs ${prior} the prior 30 days.`;
   return `Slowing: ${recent} jobs vs ${prior} the prior 30 days.`;
 }
 
 function timeOnPlatformRationale(months: number): string {
-  if (months >= 12) return `${Math.floor(months)}+ months on Forge — fully seasoned.`;
+  if (months >= 12)
+    return `${Math.floor(months)}+ months on Forge — fully seasoned.`;
   return `${Math.floor(months)} month(s) on Forge — score builds with tenure.`;
 }

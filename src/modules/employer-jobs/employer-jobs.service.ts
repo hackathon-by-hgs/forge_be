@@ -7,11 +7,7 @@ import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { paginate } from '../../common/pagination/offset.dto';
 import { AuditService } from '../../common/audit/audit.service';
-import {
-  JobsListQueryDto,
-  JobsSortBy,
-  SortDir,
-} from './dto/job-filters.dto';
+import { JobsListQueryDto, JobsSortBy, SortDir } from './dto/job-filters.dto';
 import {
   ActiveJobsResponseDto,
   DashboardJobStatusEnum,
@@ -44,6 +40,7 @@ import {
   JobAudience,
   UpdateJobDto,
 } from './dto/job-mutations.dto';
+import { JobReservationService } from './job-reservation.service';
 import {
   mapDashboardTypeToDbValues,
   mapJobTypeToDashboard,
@@ -62,7 +59,14 @@ const ACTIVE_STATUSES: DashboardJobStatusEnum[] = [
   DashboardJobStatusEnum.PendingVerification,
 ];
 
-const TEMPLATE_STATUSES = ['open', 'applications_in', 'accepted', 'in_progress', 'pending_verification', 'completed'];
+const TEMPLATE_STATUSES = [
+  'open',
+  'applications_in',
+  'accepted',
+  'in_progress',
+  'pending_verification',
+  'completed',
+];
 
 const ORDER_BY_FIELD: Record<JobsSortBy, string> = {
   [JobsSortBy.PostedAt]: 'createdAt',
@@ -80,10 +84,14 @@ export class EmployerJobsService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly audit: AuditService,
+    private readonly reservation: JobReservationService,
   ) {}
 
   // ── List (paginated, filterable, sortable) ───────────────────────────────
-  async list(employerId: string | null, q: JobsListQueryDto): Promise<JobsListResponseDto> {
+  async list(
+    employerId: string | null,
+    q: JobsListQueryDto,
+  ): Promise<JobsListResponseDto> {
     const eid = this.requireScope(employerId);
     const where = this.buildWhere(eid, q);
     const sortField = ORDER_BY_FIELD[q.sortBy ?? JobsSortBy.PostedAt];
@@ -114,18 +122,30 @@ export class EmployerJobsService {
   async active(employerId: string | null): Promise<ActiveJobsResponseDto> {
     const eid = this.requireScope(employerId);
     const rows = await this.prisma.job.findMany({
-      where: { employerId: eid, deletedAt: null, status: { in: ACTIVE_STATUSES } },
+      where: {
+        employerId: eid,
+        deletedAt: null,
+        status: { in: ACTIVE_STATUSES },
+      },
       include: { assignedWorker: true },
       orderBy: [{ startTime: 'asc' }, { id: 'asc' }],
     });
-    return { data: rows.map((j) => toDashboardJob(j, j.assignedWorker)) as JobDto[] };
+    return {
+      data: rows.map((j) => toDashboardJob(j, j.assignedWorker)) as JobDto[],
+    };
   }
 
   // ── Recent templates (top 3 most-recent posted-or-completed jobs) ────────
-  async recentTemplates(employerId: string | null): Promise<JobTemplatesResponseDto> {
+  async recentTemplates(
+    employerId: string | null,
+  ): Promise<JobTemplatesResponseDto> {
     const eid = this.requireScope(employerId);
     const rows = await this.prisma.job.findMany({
-      where: { employerId: eid, deletedAt: null, status: { in: TEMPLATE_STATUSES } },
+      where: {
+        employerId: eid,
+        deletedAt: null,
+        status: { in: TEMPLATE_STATUSES },
+      },
       orderBy: { createdAt: 'desc' },
       take: 3,
     });
@@ -135,7 +155,12 @@ export class EmployerJobsService {
       type: mapJobTypeToDashboard(j.type),
       payNaira: j.payAmount,
       durationHours: j.durationHours,
-      location: { lat: j.lat, lng: j.lng, address: j.address, neighborhood: j.neighborhood ?? null },
+      location: {
+        lat: j.lat,
+        lng: j.lng,
+        address: j.address,
+        neighborhood: j.neighborhood ?? null,
+      },
       requiredEquipment: j.requiredEquipment,
       lastUsedAt: j.createdAt.toISOString(),
     }));
@@ -154,20 +179,29 @@ export class EmployerJobsService {
   }
 
   // ── Timeline ─────────────────────────────────────────────────────────────
-  async timeline(employerId: string | null, jobId: string): Promise<JobTimelineResponseDto> {
+  async timeline(
+    employerId: string | null,
+    jobId: string,
+  ): Promise<JobTimelineResponseDto> {
     await this.requireOwnedJob(employerId, jobId);
     const events = await this.prisma.jobEvent.findMany({
       where: { jobId },
       orderBy: { occurredAt: 'asc' },
     });
-    return { data: events.map(toDashboardJobEvent) as JobTimelineEventDto[] };
+    return { data: events.map(toDashboardJobEvent) };
   }
 
   // ── Applications (ranked by score + distance) ────────────────────────────
-  async applications(employerId: string | null, jobId: string): Promise<JobApplicationsResponseDto> {
+  async applications(
+    employerId: string | null,
+    jobId: string,
+  ): Promise<JobApplicationsResponseDto> {
     await this.requireOwnedJob(employerId, jobId);
     const apps = await this.prisma.jobApplication.findMany({
-      where: { jobId, status: { in: ['applied', 'pending', 'accepted', 'rejected'] } },
+      where: {
+        jobId,
+        status: { in: ['applied', 'pending', 'accepted', 'rejected'] },
+      },
       include: { worker: true },
       orderBy: { appliedAt: 'asc' },
     });
@@ -179,7 +213,8 @@ export class EmployerJobsService {
       const reliabilityScore = a.worker.reliabilityScore / 100; // 0..1
       const onTimeScore = a.worker.onTimeRate; // 0..1 already
       const distanceScore = computeDistanceScore(a.distanceMeters);
-      const ratingScore = a.worker.averageRating > 0 ? a.worker.averageRating / 5 : 0;
+      const ratingScore =
+        a.worker.averageRating > 0 ? a.worker.averageRating / 5 : 0;
       const rankScore =
         0.4 * reliabilityScore +
         0.25 * distanceScore +
@@ -208,36 +243,53 @@ export class EmployerJobsService {
   }
 
   // ── Proof (photos + clock events + GPS verdict) ──────────────────────────
-  async proof(employerId: string | null, jobId: string): Promise<JobProofResponseDto> {
+  async proof(
+    employerId: string | null,
+    jobId: string,
+  ): Promise<JobProofResponseDto> {
     const job = await this.requireOwnedJob(employerId, jobId);
     const [photos, clockEvents] = await Promise.all([
-      this.prisma.photoProof.findMany({ where: { jobId }, orderBy: { at: 'asc' } }),
-      this.prisma.clockEvent.findMany({ where: { jobId }, orderBy: { at: 'asc' } }),
+      this.prisma.photoProof.findMany({
+        where: { jobId },
+        orderBy: { at: 'asc' },
+      }),
+      this.prisma.clockEvent.findMany({
+        where: { jobId },
+        orderBy: { at: 'asc' },
+      }),
     ]);
 
     const uploadsBaseUrl = this.config.get<string>('uploads.publicBaseUrl')!;
     const photoForKey = (key: string) =>
-      key.startsWith('http') ? key : `${uploadsBaseUrl}/${key.replace(/^\/+/, '')}`;
+      key.startsWith('http')
+        ? key
+        : `${uploadsBaseUrl}/${key.replace(/^\/+/, '')}`;
 
     const clockIn = clockEvents.find((c) => c.kind === 'clock_in');
     const clockOut = clockEvents.find((c) => c.kind === 'clock_out');
 
     const lastEvent = clockEvents.at(-1);
     const lastEventDistanceMeters = lastEvent
-      ? Math.round(haversineMeters({ lat: lastEvent.gpsLat, lng: lastEvent.gpsLng }, { lat: job.lat, lng: job.lng }))
+      ? Math.round(
+          haversineMeters(
+            { lat: lastEvent.gpsLat, lng: lastEvent.gpsLng },
+            { lat: job.lat, lng: job.lng },
+          ),
+        )
       : null;
 
     const overall: GpsVerificationDto['overall'] = (() => {
       if (clockEvents.length === 0) return 'pending';
       const allVerified = clockEvents.every(
-        (c) => c.verified && c.gpsAccuracyMeters <= GEOFENCE_ACCURACY_THRESHOLD_M,
+        (c) =>
+          c.verified && c.gpsAccuracyMeters <= GEOFENCE_ACCURACY_THRESHOLD_M,
       );
       return allVerified ? 'verified' : 'flagged';
     })();
 
     return {
-      photos: photos.map((p) => toDashboardPhotoProof(p, photoForKey)) as PhotoProofItemDto[],
-      clockEvents: clockEvents.map(toDashboardClockEvent) as ClockEventItemDto[],
+      photos: photos.map((p) => toDashboardPhotoProof(p, photoForKey)),
+      clockEvents: clockEvents.map(toDashboardClockEvent),
       gpsVerification: {
         clockInVerified: clockIn?.verified ?? false,
         clockOutVerified: clockOut?.verified ?? false,
@@ -258,7 +310,8 @@ export class EmployerJobsService {
     const id = newId(ID_PREFIXES.job);
     const status = body.postNow ? 'open' : 'draft';
     const geofenceRadius =
-      body.geofenceRadiusMeters ?? this.config.get<number>('rules.geofenceDefaultRadiusM')!;
+      body.geofenceRadiusMeters ??
+      this.config.get<number>('rules.geofenceDefaultRadiusM')!;
 
     const created = await this.prisma.$transaction(async (tx) => {
       const job = await tx.job.create({
@@ -279,10 +332,16 @@ export class EmployerJobsService {
           requiredEquipment: body.requiredEquipment ?? [],
           status,
           audience: body.audience,
-          audienceFlippedAt: body.audience === JobAudience.TeamFirst ? null : new Date(),
+          audienceFlippedAt:
+            body.audience === JobAudience.TeamFirst ? null : new Date(),
         },
         include: { assignedWorker: true },
       });
+      // Reserve funds at publish time. Drafts hold no reserve — publish later
+      // runs the same reserveOrThrow path.
+      if (body.postNow) {
+        await this.reservation.reserveOrThrow(tx, eid, id, body.payNaira);
+      }
       await tx.jobEvent.create({
         data: {
           id: newId(ID_PREFIXES.jobEvent),
@@ -305,7 +364,13 @@ export class EmployerJobsService {
       action: 'employer.job_create',
       entityType: 'job',
       entityId: id,
-      after: { title: created.title, type: dbType, payNaira: body.payNaira, status, audience: body.audience },
+      after: {
+        title: created.title,
+        type: dbType,
+        payNaira: body.payNaira,
+        status,
+        audience: body.audience,
+      },
       request: req,
     });
 
@@ -330,20 +395,41 @@ export class EmployerJobsService {
 
     const data: Prisma.JobUpdateInput = {};
     if (body.title !== undefined) data.title = body.title.trim();
-    if (body.description !== undefined) data.description = body.description.trim();
-    if (body.type !== undefined) data.type = mapDashboardTypeToDbValues(body.type)[0];
-    if (body.payNaira !== undefined) data.payAmount = body.payNaira;
-    if (body.durationHours !== undefined) data.durationHours = body.durationHours;
+    if (body.description !== undefined)
+      data.description = body.description.trim();
+    if (body.type !== undefined)
+      data.type = mapDashboardTypeToDbValues(body.type)[0];
+    if (body.payNaira !== undefined) {
+      // Once funds are reserved, payAmount is load-bearing on the wallet
+      // hold. Changing it would diverge the reserve from the new amount.
+      // Block the change until the job is cancelled + republished.
+      if (
+        before.reservedAmountNaira > 0 &&
+        body.payNaira !== before.payAmount
+      ) {
+        throw new AppError(
+          409,
+          'JOB_LOCKED',
+          'Cannot change payNaira on a job with a reservation — cancel and recreate.',
+        );
+      }
+      data.payAmount = body.payNaira;
+    }
+    if (body.durationHours !== undefined)
+      data.durationHours = body.durationHours;
     if (body.location) {
       data.lat = body.location.lat;
       data.lng = body.location.lng;
       data.address = body.location.address.trim();
       data.neighborhood = body.location.neighborhood?.trim() ?? null;
     }
-    if (body.geofenceRadiusMeters !== undefined) data.geofenceRadiusMeters = body.geofenceRadiusMeters;
+    if (body.geofenceRadiusMeters !== undefined)
+      data.geofenceRadiusMeters = body.geofenceRadiusMeters;
     if (body.audience !== undefined) data.audience = body.audience;
-    if (body.scheduledStartAt !== undefined) data.startTime = new Date(body.scheduledStartAt);
-    if (body.requiredEquipment !== undefined) data.requiredEquipment = body.requiredEquipment;
+    if (body.scheduledStartAt !== undefined)
+      data.startTime = new Date(body.scheduledStartAt);
+    if (body.requiredEquipment !== undefined)
+      data.requiredEquipment = body.requiredEquipment;
 
     const updated = await this.prisma.job.update({
       where: { id: jobId },
@@ -356,7 +442,11 @@ export class EmployerJobsService {
       action: 'employer.job_update',
       entityType: 'job',
       entityId: jobId,
-      before: { title: before.title, payAmount: before.payAmount, startTime: before.startTime },
+      before: {
+        title: before.title,
+        payAmount: before.payAmount,
+        startTime: before.startTime,
+      },
       after: { fields: Object.keys(data) },
       request: req,
     });
@@ -379,10 +469,18 @@ export class EmployerJobsService {
       );
     }
 
+    const eid = this.requireScope(actor.employerId);
     const updated = await this.prisma.$transaction(async (tx) => {
+      // Reserve funds for the job's payAmount. Throws 409 INSUFFICIENT_FUNDS
+      // back through the transaction (which rolls back) if wallet is short.
+      await this.reservation.reserveOrThrow(tx, eid, jobId, before.payAmount);
       const j = await tx.job.update({
         where: { id: jobId },
-        data: { status: 'open', audienceFlippedAt: before.audience === 'team_first' ? null : new Date() },
+        data: {
+          status: 'open',
+          audienceFlippedAt:
+            before.audience === 'team_first' ? null : new Date(),
+        },
         include: { assignedWorker: true },
       });
       await tx.jobEvent.create({
@@ -392,7 +490,7 @@ export class EmployerJobsService {
           kind: 'job_published',
           actorId: actor.userId,
           actorType: 'employer',
-          payload: {},
+          payload: { reservedNaira: before.payAmount },
         },
       });
       return j;
@@ -404,7 +502,7 @@ export class EmployerJobsService {
       entityType: 'job',
       entityId: jobId,
       before: { status: 'draft' },
-      after: { status: 'open' },
+      after: { status: 'open', reservedNaira: before.payAmount },
       request: req,
     });
 
@@ -429,6 +527,9 @@ export class EmployerJobsService {
     }
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      // Refund any reserved funds back to the employer wallet (no-op if the
+      // job was a draft with no reservation).
+      await this.reservation.refund(tx, jobId);
       const j = await tx.job.update({
         where: { id: jobId },
         data: {
@@ -449,7 +550,10 @@ export class EmployerJobsService {
           kind: 'job_cancelled',
           actorId: actor.userId,
           actorType: 'employer',
-          payload: { reason: body.reason ?? null },
+          payload: {
+            reason: body.reason ?? null,
+            refundedNaira: before.reservedAmountNaira,
+          },
         },
       });
       // Notify the assigned worker (if any) via the worker-mobile notifications table.
@@ -493,7 +597,11 @@ export class EmployerJobsService {
   ): Promise<JobApplicationItemDto> {
     const job = await this.requireOwnedJob(actor.employerId, jobId);
     if (job.assignedWorkerId) {
-      throw new AppError(409, 'INVALID_STATE', 'This job already has an assigned worker.');
+      throw new AppError(
+        409,
+        'INVALID_STATE',
+        'This job already has an assigned worker.',
+      );
     }
 
     const target = await this.prisma.jobApplication.findFirst({
@@ -520,7 +628,11 @@ export class EmployerJobsService {
 
       // Auto-reject all OTHER pending applications on this job (BACKEND_BRIEF §11.2).
       const rejectedSiblings = await tx.jobApplication.findMany({
-        where: { jobId, id: { not: appId }, status: { in: ['applied', 'pending'] } },
+        where: {
+          jobId,
+          id: { not: appId },
+          status: { in: ['applied', 'pending'] },
+        },
         select: { id: true, workerId: true },
       });
       if (rejectedSiblings.length > 0) {
@@ -558,7 +670,11 @@ export class EmployerJobsService {
             kind: 'application_rejected',
             actorId: actor.userId,
             actorType: 'employer',
-            payload: { applicationId: sib.id, workerId: sib.workerId, reason: 'sibling_accepted' },
+            payload: {
+              applicationId: sib.id,
+              workerId: sib.workerId,
+              reason: 'sibling_accepted',
+            },
           },
         });
       }
@@ -640,7 +756,11 @@ export class EmployerJobsService {
           kind: 'application_rejected',
           actorId: actor.userId,
           actorType: 'employer',
-          payload: { applicationId: appId, workerId: target.workerId, reason: 'manual' },
+          payload: {
+            applicationId: appId,
+            workerId: target.workerId,
+            reason: 'manual',
+          },
         },
       });
       await tx.notification.create({
@@ -686,19 +806,26 @@ export class EmployerJobsService {
       );
     }
     if (!job.assignedWorkerId) {
-      throw new AppError(409, 'INVALID_STATE', 'Job has no assigned worker — cannot invoice.');
+      throw new AppError(
+        409,
+        'INVALID_STATE',
+        'Job has no assigned worker — cannot invoice.',
+      );
     }
 
     const worker = await this.prisma.worker.findUnique({
       where: { id: job.assignedWorkerId },
       select: { name: true },
     });
-    if (!worker) throw new AppError(404, 'NOT_FOUND', 'Assigned worker not found.');
+    if (!worker)
+      throw new AppError(404, 'NOT_FOUND', 'Assigned worker not found.');
 
     const id = newId(ID_PREFIXES.invoice);
     const number = `INV-${id.slice(-6).toUpperCase()}`;
     const issuedAt = new Date();
-    const dueAt = body.dueAt ? new Date(body.dueAt) : new Date(issuedAt.getTime() + 14 * 24 * 3600 * 1000);
+    const dueAt = body.dueAt
+      ? new Date(body.dueAt)
+      : new Date(issuedAt.getTime() + 14 * 24 * 3600 * 1000);
 
     const lineItems: InvoiceLineItemDto[] = [
       {
@@ -815,7 +942,11 @@ export class EmployerJobsService {
   // ── Helpers ──────────────────────────────────────────────────────────────
   private requireScope(employerId: string | null): string {
     if (!employerId) {
-      throw new AppError(403, 'NO_EMPLOYER_SCOPE', 'This account is not bound to a business.');
+      throw new AppError(
+        403,
+        'NO_EMPLOYER_SCOPE',
+        'This account is not bound to a business.',
+      );
     }
     return employerId;
   }
@@ -829,7 +960,10 @@ export class EmployerJobsService {
     return job;
   }
 
-  private buildWhere(employerId: string, q: JobsListQueryDto): Prisma.JobWhereInput {
+  private buildWhere(
+    employerId: string,
+    q: JobsListQueryDto,
+  ): Prisma.JobWhereInput {
     const where: Prisma.JobWhereInput = {
       employerId,
       deletedAt: null,
@@ -876,23 +1010,30 @@ function computeDistanceScore(distanceMeters: number | null): number {
 }
 
 function csvLine(fields: string[]): string {
-  return fields
-    .map((f) => {
-      // RFC 4180: quote any field containing comma, quote, or newline; double-up internal quotes.
-      const needsQuote = /[",\n\r]/.test(f);
-      const escaped = f.replace(/"/g, '""');
-      return needsQuote ? `"${escaped}"` : escaped;
-    })
-    .join(',') + '\r\n';
+  return (
+    fields
+      .map((f) => {
+        // RFC 4180: quote any field containing comma, quote, or newline; double-up internal quotes.
+        const needsQuote = /[",\n\r]/.test(f);
+        const escaped = f.replace(/"/g, '""');
+        return needsQuote ? `"${escaped}"` : escaped;
+      })
+      .join(',') + '\r\n'
+  );
 }
 
-function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+function haversineMeters(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number },
+): number {
   const R = 6_371_000;
   const toRad = (deg: number) => (deg * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);
   const dLng = toRad(b.lng - a.lng);
   const lat1 = toRad(a.lat);
   const lat2 = toRad(b.lat);
-  const h = Math.sin(dLat / 2) ** 2 + Math.sin(dLng / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.sin(dLng / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
   return 2 * R * Math.asin(Math.sqrt(h));
 }

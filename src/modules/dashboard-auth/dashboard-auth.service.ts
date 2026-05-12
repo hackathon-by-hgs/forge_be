@@ -23,6 +23,7 @@ import { LoginResponseDto, SessionUserDto } from './dto/session.dto';
 import { UserJwtPayload } from './strategies/jwt-user.strategy';
 import { TeamService } from '../settings/team.service';
 import { AcceptInvitationDto } from '../settings/dto/team.dto';
+import { VirtualAccountProvisioner } from '../squad/virtual-account-provisioner.service';
 
 interface RefreshPayload {
   sub: string;
@@ -41,10 +42,20 @@ export class DashboardAuthService {
     private readonly email: EmailService,
     private readonly audit: AuditService,
     private readonly teams: TeamService,
+    private readonly virtualAccount: VirtualAccountProvisioner,
   ) {}
 
   // ── Register ───────────────────────────────────────────────────────────────
-  async register(body: RegisterDto, req: Request): Promise<{ accessToken: string; refreshToken: string; refreshExpiresAt: Date; accessExpiresAt: Date; user: SessionUserDto }> {
+  async register(
+    body: RegisterDto,
+    req: Request,
+  ): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    refreshExpiresAt: Date;
+    accessExpiresAt: Date;
+    user: SessionUserDto;
+  }> {
     // Worker + platform_admin: never self-serve.
     // business_owner: must use POST /dashboard/auth/business/register so the
     //   Employer + owner User are created in one transaction (no orphans).
@@ -66,9 +77,15 @@ export class DashboardAuthService {
           : 'This role cannot self-register. Ask an admin for an invitation.',
       );
     }
-    const existing = await this.prisma.user.findUnique({ where: { email: body.email.toLowerCase() } });
+    const existing = await this.prisma.user.findUnique({
+      where: { email: body.email.toLowerCase() },
+    });
     if (existing) {
-      throw new AppError(409, 'EMAIL_ALREADY_REGISTERED', 'An account with this email already exists.');
+      throw new AppError(
+        409,
+        'EMAIL_ALREADY_REGISTERED',
+        'An account with this email already exists.',
+      );
     }
     const passwordHash = await argon2.hash(body.password);
     const userId = newId(ID_PREFIXES.user);
@@ -95,9 +112,20 @@ export class DashboardAuthService {
         expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
       },
     });
-    void this.email.sendVerification(user.email, verifyToken, user.role as Role);
+    void this.email.sendVerification(
+      user.email,
+      verifyToken,
+      user.role as Role,
+    );
 
-    const tokens = await this.issueTokens(user.id, user.email, user.role as Role, user.employerId, user.bankId, req);
+    const tokens = await this.issueTokens(
+      user.id,
+      user.email,
+      user.role as Role,
+      user.employerId,
+      user.bankId,
+      req,
+    );
 
     await this.audit.record({
       actor: { type: 'user', id: user.id },
@@ -118,11 +146,21 @@ export class DashboardAuthService {
   async registerBusiness(
     body: BusinessRegisterDto,
     req: Request,
-  ): Promise<{ accessToken: string; refreshToken: string; refreshExpiresAt: Date; accessExpiresAt: Date; user: SessionUserDto }> {
+  ): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    refreshExpiresAt: Date;
+    accessExpiresAt: Date;
+    user: SessionUserDto;
+  }> {
     const email = body.email.toLowerCase();
     const existing = await this.prisma.user.findUnique({ where: { email } });
     if (existing) {
-      throw new AppError(409, 'EMAIL_ALREADY_REGISTERED', 'An account with this email already exists.');
+      throw new AppError(
+        409,
+        'EMAIL_ALREADY_REGISTERED',
+        'An account with this email already exists.',
+      );
     }
 
     const passwordHash = await argon2.hash(body.password);
@@ -170,7 +208,11 @@ export class DashboardAuthService {
       return u;
     });
 
-    void this.email.sendVerification(user.email, verifyToken, user.role as Role);
+    void this.email.sendVerification(
+      user.email,
+      verifyToken,
+      user.role as Role,
+    );
 
     const tokens = await this.issueTokens(
       user.id,
@@ -194,6 +236,11 @@ export class DashboardAuthService {
       request: req,
     });
 
+    // Provision the Squad virtual NUBAN out-of-band — fire-and-forget so a
+    // Squad outage doesn't block signup. The lazy-retry on `GET /overview`
+    // will pick up any failure on the next request.
+    void this.virtualAccount.ensureForEmployer(employerId);
+
     return {
       ...tokens,
       user: this.toSessionUser(user),
@@ -204,13 +251,25 @@ export class DashboardAuthService {
   async acceptTeamInvite(
     body: AcceptInvitationDto,
     req: Request,
-  ): Promise<{ accessToken: string; refreshToken: string; refreshExpiresAt: Date; accessExpiresAt: Date; user: SessionUserDto }> {
+  ): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    refreshExpiresAt: Date;
+    accessExpiresAt: Date;
+    user: SessionUserDto;
+  }> {
     const invitation = await this.teams.claimByToken(body.token);
 
-    const existing = await this.prisma.user.findUnique({ where: { email: invitation.email } });
+    const existing = await this.prisma.user.findUnique({
+      where: { email: invitation.email },
+    });
     if (existing) {
       // Edge case: someone signed up for a different employer between invite-send and accept.
-      throw new AppError(409, 'EMAIL_ALREADY_REGISTERED', 'An account with this email already exists.');
+      throw new AppError(
+        409,
+        'EMAIL_ALREADY_REGISTERED',
+        'An account with this email already exists.',
+      );
     }
 
     const passwordHash = await argon2.hash(body.password);
@@ -250,7 +309,11 @@ export class DashboardAuthService {
       action: 'employer.team_invite_accept',
       entityType: 'user',
       entityId: user.id,
-      after: { email: user.email, role: user.role, employerId: user.employerId },
+      after: {
+        email: user.email,
+        role: user.role,
+        employerId: user.employerId,
+      },
       request: req,
     });
 
@@ -258,21 +321,47 @@ export class DashboardAuthService {
   }
 
   // ── Login ──────────────────────────────────────────────────────────────────
-  async login(body: LoginDto, req: Request): Promise<{ accessToken: string; refreshToken: string; refreshExpiresAt: Date; accessExpiresAt: Date; user: SessionUserDto }> {
-    const user = await this.prisma.user.findUnique({ where: { email: body.email.toLowerCase() } });
+  async login(
+    body: LoginDto,
+    req: Request,
+  ): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    refreshExpiresAt: Date;
+    accessExpiresAt: Date;
+    user: SessionUserDto;
+  }> {
+    const user = await this.prisma.user.findUnique({
+      where: { email: body.email.toLowerCase() },
+    });
     if (!user || !user.passwordHash) {
       // Avoid leaking which email exists.
-      throw new AppError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect.');
+      throw new AppError(
+        401,
+        'INVALID_CREDENTIALS',
+        'Email or password is incorrect.',
+      );
     }
     const ok = await argon2.verify(user.passwordHash, body.password);
     if (!ok) {
-      throw new AppError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect.');
+      throw new AppError(
+        401,
+        'INVALID_CREDENTIALS',
+        'Email or password is incorrect.',
+      );
     }
     await this.prisma.user.update({
       where: { id: user.id },
       data: { lastLoginAt: new Date() },
     });
-    const tokens = await this.issueTokens(user.id, user.email, user.role as Role, user.employerId, user.bankId, req);
+    const tokens = await this.issueTokens(
+      user.id,
+      user.email,
+      user.role as Role,
+      user.employerId,
+      user.bankId,
+      req,
+    );
     return {
       ...tokens,
       user: this.toSessionUser(user),
@@ -280,7 +369,16 @@ export class DashboardAuthService {
   }
 
   // ── Refresh ────────────────────────────────────────────────────────────────
-  async refresh(token: string, req: Request): Promise<{ accessToken: string; refreshToken: string; refreshExpiresAt: Date; accessExpiresAt: Date; user: SessionUserDto }> {
+  async refresh(
+    token: string,
+    req: Request,
+  ): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    refreshExpiresAt: Date;
+    accessExpiresAt: Date;
+    user: SessionUserDto;
+  }> {
     let payload: RefreshPayload;
     try {
       payload = await this.jwt.verifyAsync<RefreshPayload>(token, {
@@ -291,24 +389,36 @@ export class DashboardAuthService {
     }
 
     const tokenHash = this.hashToken(token);
-    const stored = await this.prisma.userRefreshToken.findUnique({ where: { tokenHash } });
+    const stored = await this.prisma.userRefreshToken.findUnique({
+      where: { tokenHash },
+    });
     if (!stored || stored.userId !== payload.sub) {
       throw new AppError(401, 'TOKEN_INVALID', 'Refresh token is invalid.');
     }
     if (stored.revokedAt) {
-      throw new AppError(401, 'TOKEN_INVALID', 'Refresh token has been revoked.');
+      throw new AppError(
+        401,
+        'TOKEN_INVALID',
+        'Refresh token has been revoked.',
+      );
     }
     if (stored.expiresAt < new Date()) {
       throw new AppError(401, 'TOKEN_EXPIRED', 'Refresh token has expired.');
     }
     if (stored.usedAt) {
       // Reuse detected — kill the entire family.
-      this.logger.warn(`Refresh token reuse detected on family ${stored.familyId}`);
+      this.logger.warn(
+        `Refresh token reuse detected on family ${stored.familyId}`,
+      );
       await this.prisma.userRefreshToken.updateMany({
         where: { familyId: stored.familyId },
         data: { revokedAt: new Date() },
       });
-      throw new AppError(401, 'TOKEN_INVALID', 'Refresh token reuse detected; please log in again.');
+      throw new AppError(
+        401,
+        'TOKEN_INVALID',
+        'Refresh token reuse detected; please log in again.',
+      );
     }
 
     // Mark old token used (single-use), then issue a new pair on the SAME family.
@@ -317,12 +427,22 @@ export class DashboardAuthService {
       data: { usedAt: new Date() },
     });
 
-    const user = await this.prisma.user.findUnique({ where: { id: stored.userId } });
+    const user = await this.prisma.user.findUnique({
+      where: { id: stored.userId },
+    });
     if (!user) {
       throw new AppError(401, 'TOKEN_INVALID', 'User no longer exists.');
     }
 
-    const tokens = await this.issueTokens(user.id, user.email, user.role as Role, user.employerId, user.bankId, req, stored.familyId);
+    const tokens = await this.issueTokens(
+      user.id,
+      user.email,
+      user.role as Role,
+      user.employerId,
+      user.bankId,
+      req,
+      stored.familyId,
+    );
     return {
       ...tokens,
       user: this.toSessionUser(user),
@@ -348,18 +468,37 @@ export class DashboardAuthService {
   // ── Email verify / forgot / reset ──────────────────────────────────────────
   async verifyEmail(body: VerifyEmailDto): Promise<void> {
     const tokenHash = this.hashToken(body.token);
-    const token = await this.prisma.emailToken.findUnique({ where: { tokenHash } });
-    if (!token || token.consumed || token.purpose !== 'verify' || token.expiresAt < new Date()) {
-      throw new AppError(400, 'TOKEN_INVALID', 'This verification link is invalid or expired.');
+    const token = await this.prisma.emailToken.findUnique({
+      where: { tokenHash },
+    });
+    if (
+      !token ||
+      token.consumed ||
+      token.purpose !== 'verify' ||
+      token.expiresAt < new Date()
+    ) {
+      throw new AppError(
+        400,
+        'TOKEN_INVALID',
+        'This verification link is invalid or expired.',
+      );
     }
     await this.prisma.$transaction([
-      this.prisma.emailToken.update({ where: { id: token.id }, data: { consumed: true } }),
-      this.prisma.user.update({ where: { id: token.userId }, data: { emailVerifiedAt: new Date() } }),
+      this.prisma.emailToken.update({
+        where: { id: token.id },
+        data: { consumed: true },
+      }),
+      this.prisma.user.update({
+        where: { id: token.userId },
+        data: { emailVerifiedAt: new Date() },
+      }),
     ]);
   }
 
   async forgot(body: ForgotPasswordDto): Promise<void> {
-    const user = await this.prisma.user.findUnique({ where: { email: body.email.toLowerCase() } });
+    const user = await this.prisma.user.findUnique({
+      where: { email: body.email.toLowerCase() },
+    });
     if (!user) return; // Don't leak existence.
     const token = this.randomToken();
     await this.prisma.emailToken.create({
@@ -376,14 +515,31 @@ export class DashboardAuthService {
 
   async reset(body: ResetPasswordDto): Promise<void> {
     const tokenHash = this.hashToken(body.token);
-    const token = await this.prisma.emailToken.findUnique({ where: { tokenHash } });
-    if (!token || token.consumed || token.purpose !== 'reset' || token.expiresAt < new Date()) {
-      throw new AppError(400, 'TOKEN_INVALID', 'This reset link is invalid or expired.');
+    const token = await this.prisma.emailToken.findUnique({
+      where: { tokenHash },
+    });
+    if (
+      !token ||
+      token.consumed ||
+      token.purpose !== 'reset' ||
+      token.expiresAt < new Date()
+    ) {
+      throw new AppError(
+        400,
+        'TOKEN_INVALID',
+        'This reset link is invalid or expired.',
+      );
     }
     const passwordHash = await argon2.hash(body.newPassword);
     await this.prisma.$transaction([
-      this.prisma.emailToken.update({ where: { id: token.id }, data: { consumed: true } }),
-      this.prisma.user.update({ where: { id: token.userId }, data: { passwordHash } }),
+      this.prisma.emailToken.update({
+        where: { id: token.id },
+        data: { consumed: true },
+      }),
+      this.prisma.user.update({
+        where: { id: token.userId },
+        data: { passwordHash },
+      }),
       // Kill all sessions on password change.
       this.prisma.userRefreshToken.updateMany({
         where: { userId: token.userId, revokedAt: null },
@@ -414,15 +570,24 @@ export class DashboardAuthService {
     const family = familyId ?? newId('fam');
     const jti = newId(ID_PREFIXES.userRefresh);
 
-    const accessPayload: UserJwtPayload = { sub: userId, email, role, employerId, bankId };
+    const accessPayload: UserJwtPayload = {
+      sub: userId,
+      email,
+      role,
+      employerId,
+      bankId,
+    };
     const accessToken = await this.jwt.signAsync(accessPayload, {
       secret: this.config.get<string>('jwt.userAccessSecret'),
       expiresIn: accessTtl,
     });
-    const refreshToken = await this.jwt.signAsync({ sub: userId, jti, family } satisfies RefreshPayload, {
-      secret: this.config.get<string>('jwt.userRefreshSecret'),
-      expiresIn: refreshTtl,
-    });
+    const refreshToken = await this.jwt.signAsync(
+      { sub: userId, jti, family } satisfies RefreshPayload,
+      {
+        secret: this.config.get<string>('jwt.userRefreshSecret'),
+        expiresIn: refreshTtl,
+      },
+    );
 
     const accessExpiresAt = new Date(Date.now() + accessTtl * 1000);
     const refreshExpiresAt = new Date(Date.now() + refreshTtl * 1000);
@@ -434,7 +599,7 @@ export class DashboardAuthService {
         tokenHash: this.hashToken(refreshToken),
         familyId: family,
         expiresAt: refreshExpiresAt,
-        userAgent: (req.headers['user-agent'] as string | undefined) ?? null,
+        userAgent: req.headers['user-agent'] ?? null,
         ipAddress: req.ip ?? null,
       },
     });
@@ -442,7 +607,16 @@ export class DashboardAuthService {
     return { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt };
   }
 
-  private toSessionUser(user: { id: string; email: string; fullName: string; avatarUrl: string | null; role: string; employerId: string | null; bankId: string | null; emailVerifiedAt: Date | null }): SessionUserDto {
+  private toSessionUser(user: {
+    id: string;
+    email: string;
+    fullName: string;
+    avatarUrl: string | null;
+    role: string;
+    employerId: string | null;
+    bankId: string | null;
+    emailVerifiedAt: Date | null;
+  }): SessionUserDto {
     return {
       id: user.id,
       email: user.email,

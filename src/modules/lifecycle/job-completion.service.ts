@@ -4,7 +4,11 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 
 /** Internal — what each `worker_late` notification touches in the DB. */
-const EMPLOYER_BUSINESS_ROLES = ['business_owner', 'business_admin', 'business_hiring_manager'] as const;
+const EMPLOYER_BUSINESS_ROLES = [
+  'business_owner',
+  'business_admin',
+  'business_hiring_manager',
+] as const;
 
 export interface CompletionContext {
   /** Optional — provide when the caller is already inside a `$transaction`. */
@@ -54,8 +58,12 @@ export class JobCompletionService {
    * outcome). This matters for the timeout cron, which can fire multiple
    * times before the session ages out of its query.
    */
-  async completeSession(sessionId: string, ctx: CompletionContext): Promise<CompletionOutcome | null> {
-    const run = (tx: Prisma.TransactionClient) => this.runCompletion(tx, sessionId, ctx);
+  async completeSession(
+    sessionId: string,
+    ctx: CompletionContext,
+  ): Promise<CompletionOutcome | null> {
+    const run = (tx: Prisma.TransactionClient) =>
+      this.runCompletion(tx, sessionId, ctx);
 
     if (ctx.tx) {
       // Caller owns the transaction (clock-out path).
@@ -73,7 +81,11 @@ export class JobCompletionService {
   ): Promise<CompletionOutcome | null> {
     const session = await tx.workSession.findUnique({
       where: { id: sessionId },
-      include: { application: { include: { job: { include: { employer: true } }, worker: true } } },
+      include: {
+        application: {
+          include: { job: { include: { employer: true } }, worker: true },
+        },
+      },
     });
     if (!session) return null;
     if (session.application.status === 'completed') {
@@ -84,14 +96,19 @@ export class JobCompletionService {
     const job = session.application.job;
     const worker = session.application.worker;
     const employer = job.employer;
-    const amount = session.payAmountPending > 0 ? session.payAmountPending : session.payAmountDisbursed;
+    const amount =
+      session.payAmountPending > 0
+        ? session.payAmountPending
+        : session.payAmountDisbursed;
     const now = new Date();
 
-    // Decide payment fate. Auto-debit (§11.6) only fires when the employer wallet
-    // can cover it AND auto-payouts are enabled. Otherwise the transaction lands
-    // in `pending` and the dashboard team is notified to top up.
+    // Decide payment fate. Funds were already escrowed into Job.reservedAmountNaira
+    // at publish time, so completion just drains the reserve into the worker's
+    // wallet. Pause check still applies. `insufficient_balance` here should be
+    // unreachable in normal operation — it fires only if the reserve was
+    // tampered with (data corruption / direct DB edit / a pre-escrow legacy job).
     const payoutsPaused = !!employer.payoutsPaused;
-    const sufficient = employer.walletBalanceNaira >= amount;
+    const sufficient = job.reservedAmountNaira >= amount;
     const paymentStatus: CompletionOutcome['paymentStatus'] =
       !payoutsPaused && sufficient ? 'succeeded' : 'pending';
     const pendingReason: CompletionOutcome['pendingReason'] =
@@ -120,8 +137,11 @@ export class JobCompletionService {
     });
 
     // 3) Transaction row + wallet bookkeeping.
+    // Internal transfer — no real Squad call. The synthetic reference makes
+    // the source obvious in logs (`internal_…`) so it doesn't get confused
+    // with a real Squad reference during reconciliation.
     const transactionId = newId(ID_PREFIXES.transaction);
-    const squadReference = 'sqd_' + transactionId.slice(4);
+    const squadReference = `internal_${transactionId.slice(4)}`;
     await tx.transaction.create({
       data: {
         id: transactionId,
@@ -141,11 +161,15 @@ export class JobCompletionService {
 
     let loanRepaymentNaira = 0;
     if (paymentStatus === 'succeeded') {
-      // Move funds: employer wallet → worker wallet, with totals.
+      // Drain the escrow into the worker's wallet. Employer wallet was
+      // already decremented at publish — we just zero the reserve here.
+      await tx.job.update({
+        where: { id: job.id },
+        data: { reservedAmountNaira: { decrement: amount } },
+      });
       await tx.employer.update({
         where: { id: employer.id },
         data: {
-          walletBalanceNaira: { decrement: amount },
           totalLaborSpendNaira: { increment: amount },
         },
       });
@@ -162,7 +186,11 @@ export class JobCompletionService {
       // configured cut and create a sibling ledger row that mirrors what the
       // worker sees on their mobile wallet feed.
       const activeLoan = await tx.loan.findFirst({
-        where: { workerId: worker.id, status: 'active', outstandingBalance: { gt: 0 } },
+        where: {
+          workerId: worker.id,
+          status: 'active',
+          outstandingBalance: { gt: 0 },
+        },
       });
       if (activeLoan && activeLoan.repaymentPercentPerJob > 0) {
         const cut = Math.min(
@@ -181,7 +209,7 @@ export class JobCompletionService {
               title: 'Loan repayment',
               subtitle: 'Auto-deducted from job payment',
               relatedJobId: job.id,
-              squadReference: 'sqd_' + repaymentTxId.slice(4),
+              squadReference: `internal_${repaymentTxId.slice(4)}`,
               status: 'succeeded',
             },
           });
@@ -242,7 +270,10 @@ export class JobCompletionService {
         {
           id: newId(ID_PREFIXES.jobEvent),
           jobId: job.id,
-          kind: paymentStatus === 'succeeded' ? 'payment_processed' : 'payment_initiated',
+          kind:
+            paymentStatus === 'succeeded'
+              ? 'payment_processed'
+              : 'payment_initiated',
           actorId: 'system',
           actorType: 'system',
           payload: {
@@ -262,8 +293,14 @@ export class JobCompletionService {
       data: {
         id: newId(ID_PREFIXES.notification),
         workerId: worker.id,
-        kind: paymentStatus === 'succeeded' ? 'payment_received' : 'payment_pending',
-        title: paymentStatus === 'succeeded' ? 'Payment received' : 'Payment pending',
+        kind:
+          paymentStatus === 'succeeded'
+            ? 'payment_received'
+            : 'payment_pending',
+        title:
+          paymentStatus === 'succeeded'
+            ? 'Payment received'
+            : 'Payment pending',
         body:
           paymentStatus === 'succeeded'
             ? `₦${amount.toLocaleString('en-NG')} arrived in your wallet.`
@@ -277,7 +314,10 @@ export class JobCompletionService {
     //    These are the same notifications that the bell shows on the dashboard.
     if (paymentStatus === 'pending') {
       const recipients = await tx.user.findMany({
-        where: { employerId: employer.id, role: { in: [...EMPLOYER_BUSINESS_ROLES] } },
+        where: {
+          employerId: employer.id,
+          role: { in: [...EMPLOYER_BUSINESS_ROLES] },
+        },
         select: { id: true },
       });
       for (const r of recipients) {
@@ -286,7 +326,10 @@ export class JobCompletionService {
             id: newId(ID_PREFIXES.userNotification),
             recipientUserId: r.id,
             kind: 'payment_pending',
-            title: pendingReason === 'payouts_paused' ? 'Payout paused' : 'Top up to pay worker',
+            title:
+              pendingReason === 'payouts_paused'
+                ? 'Payout paused'
+                : 'Top up to pay worker',
             detail:
               pendingReason === 'payouts_paused'
                 ? `${worker.name} finished "${job.title}" — payment is paused until you resume payouts.`

@@ -3,13 +3,14 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
-import { decodeCursor, encodeCursor } from '../../common/pagination/cursor.util';
+import {
+  decodeCursor,
+  encodeCursor,
+} from '../../common/pagination/cursor.util';
+import { VirtualAccountProvisioner } from '../squad/virtual-account-provisioner.service';
 import { toWorkerDto } from './me.mapper';
 import { EditProfileDto } from './dto/edit-profile.dto';
-import {
-  PreferencesDto,
-  PreferencesPatchDto,
-} from './dto/preferences.dto';
+import { PreferencesDto, PreferencesPatchDto } from './dto/preferences.dto';
 import { RegisterDeviceDto } from './dto/device.dto';
 import {
   AccountDeletionResponseDto,
@@ -23,36 +24,68 @@ export class MeService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly virtualAccount: VirtualAccountProvisioner,
   ) {}
 
   async me(workerId: string) {
-    const worker = await this.prisma.worker.findUnique({ where: { id: workerId } });
+    const worker = await this.prisma.worker.findUnique({
+      where: { id: workerId },
+    });
     if (!worker) throw new AppError(404, 'NOT_FOUND', 'Worker not found.');
+    // Lazy retry: re-provision the Squad virtual NUBAN if signup hit a Squad
+    // outage (or this is a seeded worker). Fire-and-forget; the next /me call
+    // picks up the new fields.
+    if (
+      !worker.squadVirtualAccountNumber &&
+      worker.name &&
+      worker.name.trim().length > 0
+    ) {
+      void this.virtualAccount.ensureForWorker(workerId);
+    }
     return { worker: toWorkerDto(worker) };
   }
 
   async edit(workerId: string, body: EditProfileDto) {
-    const worker = await this.prisma.worker.findUnique({ where: { id: workerId } });
+    const worker = await this.prisma.worker.findUnique({
+      where: { id: workerId },
+    });
     if (!worker) throw new AppError(404, 'NOT_FOUND', 'Worker not found.');
 
     let photoUrl = worker.photoUrl;
     if (body.photo_upload_id === null) {
       photoUrl = null;
     } else if (typeof body.photo_upload_id === 'string') {
-      const upload = await this.prisma.upload.findUnique({ where: { id: body.photo_upload_id } });
-      if (!upload || upload.workerId !== workerId || upload.purpose !== 'worker_avatar') {
-        throw new AppError(422, 'UPLOAD_NOT_FOUND', 'Photo upload not found or expired.');
+      const upload = await this.prisma.upload.findUnique({
+        where: { id: body.photo_upload_id },
+      });
+      if (
+        !upload ||
+        upload.workerId !== workerId ||
+        upload.purpose !== 'worker_avatar'
+      ) {
+        throw new AppError(
+          422,
+          'UPLOAD_NOT_FOUND',
+          'Photo upload not found or expired.',
+        );
       }
       photoUrl = upload.url;
-      await this.prisma.upload.update({ where: { id: upload.id }, data: { promoted: true } });
+      await this.prisma.upload.update({
+        where: { id: upload.id },
+        data: { promoted: true },
+      });
     }
 
     const updated = await this.prisma.worker.update({
       where: { id: workerId },
       data: {
         ...(body.name !== undefined ? { name: body.name.trim() } : {}),
-        ...(body.primary_skill !== undefined ? { primarySkill: body.primary_skill } : {}),
-        ...(body.preferred_radius_km !== undefined ? { preferredRadiusKm: body.preferred_radius_km } : {}),
+        ...(body.primary_skill !== undefined
+          ? { primarySkill: body.primary_skill }
+          : {}),
+        ...(body.preferred_radius_km !== undefined
+          ? { preferredRadiusKm: body.preferred_radius_km }
+          : {}),
         photoUrl,
       },
     });
@@ -72,21 +105,29 @@ export class MeService {
         payment_confirmations: p.paymentConfirmations,
         loan_reminders: p.loanReminders,
       },
-      privacy: { allow_location_tracking_during_work: p.allowLocationTrackingDuringWork },
+      privacy: {
+        allow_location_tracking_during_work: p.allowLocationTrackingDuringWork,
+      },
     };
   }
 
-  async patchPreferences(workerId: string, body: PreferencesPatchDto): Promise<PreferencesDto> {
+  async patchPreferences(
+    workerId: string,
+    body: PreferencesPatchDto,
+  ): Promise<PreferencesDto> {
     const data: Record<string, unknown> = {};
     if (body.notifications) {
       const n = body.notifications;
       if (n.new_job_alerts !== undefined) data.newJobAlerts = n.new_job_alerts;
-      if (n.application_updates !== undefined) data.applicationUpdates = n.application_updates;
-      if (n.payment_confirmations !== undefined) data.paymentConfirmations = n.payment_confirmations;
+      if (n.application_updates !== undefined)
+        data.applicationUpdates = n.application_updates;
+      if (n.payment_confirmations !== undefined)
+        data.paymentConfirmations = n.payment_confirmations;
       if (n.loan_reminders !== undefined) data.loanReminders = n.loan_reminders;
     }
     if (body.privacy?.allow_location_tracking_during_work !== undefined) {
-      data.allowLocationTrackingDuringWork = body.privacy.allow_location_tracking_during_work;
+      data.allowLocationTrackingDuringWork =
+        body.privacy.allow_location_tracking_during_work;
     }
     await this.prisma.preference.upsert({
       where: { workerId },
@@ -109,9 +150,15 @@ export class MeService {
       where: { workerId, kind: 'withdrawal', status: 'pending' },
     });
     if (pendingWithdrawal) {
-      throw new AppError(409, 'DELETE_BLOCKED', 'Pending withdrawal in flight.', {
-        reason: 'Wait for your withdrawal to settle before deleting your account.',
-      });
+      throw new AppError(
+        409,
+        'DELETE_BLOCKED',
+        'Pending withdrawal in flight.',
+        {
+          reason:
+            'Wait for your withdrawal to settle before deleting your account.',
+        },
+      );
     }
     const now = new Date();
     const completesAt = new Date(now.getTime() + 30 * 24 * 3600 * 1000);
@@ -136,7 +183,11 @@ export class MeService {
       where: { phoneNumber: body.new_phone, NOT: { id: workerId } },
     });
     if (taken) {
-      throw new AppError(409, 'PHONE_ALREADY_EXISTS', 'That number is already in use.');
+      throw new AppError(
+        409,
+        'PHONE_ALREADY_EXISTS',
+        'That number is already in use.',
+      );
     }
     const ttl = this.config.get<number>('otp.ttlSeconds')!;
     const cooldown = this.config.get<number>('otp.resendCooldownSeconds')!;
@@ -160,13 +211,23 @@ export class MeService {
     };
   }
 
-  async phoneChangeConfirm(workerId: string, challengeId: string, code: string) {
-    const challenge = await this.prisma.otpChallenge.findUnique({ where: { id: challengeId } });
+  async phoneChangeConfirm(
+    workerId: string,
+    challengeId: string,
+    code: string,
+  ) {
+    const challenge = await this.prisma.otpChallenge.findUnique({
+      where: { id: challengeId },
+    });
     if (!challenge || challenge.ownerWorkerId !== workerId) {
       throw new AppError(404, 'CHALLENGE_NOT_FOUND', 'Unknown OTP challenge.');
     }
     if (challenge.consumed || challenge.expiresAt < new Date()) {
-      throw new AppError(410, 'CHALLENGE_EXPIRED', 'OTP expired. Request a new one.');
+      throw new AppError(
+        410,
+        'CHALLENGE_EXPIRED',
+        'OTP expired. Request a new one.',
+      );
     }
     const ok = await argon2.verify(challenge.codeHash, code);
     if (!ok) {
@@ -177,13 +238,22 @@ export class MeService {
       throw new AppError(422, 'CODE_INCORRECT', 'Incorrect code.');
     }
     const updated = await this.prisma.$transaction(async (tx) => {
-      await tx.otpChallenge.update({ where: { id: challengeId }, data: { consumed: true } });
-      return tx.worker.update({ where: { id: workerId }, data: { phoneNumber: challenge.phone } });
+      await tx.otpChallenge.update({
+        where: { id: challengeId },
+        data: { consumed: true },
+      });
+      return tx.worker.update({
+        where: { id: workerId },
+        data: { phoneNumber: challenge.phone },
+      });
     });
     return { worker: toWorkerDto(updated) };
   }
 
-  async registerDevice(workerId: string, body: RegisterDeviceDto): Promise<void> {
+  async registerDevice(
+    workerId: string,
+    body: RegisterDeviceDto,
+  ): Promise<void> {
     await this.prisma.deviceToken.upsert({
       where: { workerId_deviceId: { workerId, deviceId: body.device_id } },
       create: {
@@ -202,7 +272,10 @@ export class MeService {
     });
   }
 
-  async listNotifications(workerId: string, q: { cursor?: string; limit?: number }) {
+  async listNotifications(
+    workerId: string,
+    q: { cursor?: string; limit?: number },
+  ) {
     const limit = q.limit ?? 30;
     const cursor = decodeCursor(q.cursor);
     const where: Record<string, unknown> = { workerId };
@@ -220,7 +293,9 @@ export class MeService {
     const hasMore = rows.length > limit;
     const page = rows.slice(0, limit);
     const last = page.at(-1);
-    const unreadCount = await this.prisma.notification.count({ where: { workerId, unread: true } });
+    const unreadCount = await this.prisma.notification.count({
+      where: { workerId, unread: true },
+    });
     return {
       items: page.map((n) => ({
         id: n.id,
@@ -231,17 +306,20 @@ export class MeService {
         unread: n.unread,
         deeplink: n.deeplink,
       })),
-      next_cursor: hasMore && last
-        ? encodeCursor({ ts: last.timestamp.toISOString(), id: last.id })
-        : null,
+      next_cursor:
+        hasMore && last
+          ? encodeCursor({ ts: last.timestamp.toISOString(), id: last.id })
+          : null,
       has_more: hasMore,
       unread_count: unreadCount,
     };
   }
 
   async markRead(workerId: string, id: string): Promise<void> {
-    await this.prisma.notification
-      .updateMany({ where: { id, workerId }, data: { unread: false } });
+    await this.prisma.notification.updateMany({
+      where: { id, workerId },
+      data: { unread: false },
+    });
   }
 
   async markAllRead(workerId: string): Promise<void> {

@@ -48,7 +48,8 @@ export class SettingsService {
   ): Promise<BusinessProfileDto> {
     const before = await this.requireEmployer(employerId);
     const data: Record<string, unknown> = {};
-    if (body.businessName !== undefined) data.businessName = body.businessName.trim();
+    if (body.businessName !== undefined)
+      data.businessName = body.businessName.trim();
     if (body.type !== undefined) data.type = body.type;
     if (body.phoneNumber !== undefined) data.phoneNumber = body.phoneNumber;
     if (body.registeredLocation) {
@@ -64,14 +65,19 @@ export class SettingsService {
       entityType: 'employer',
       entityId: before.id,
       before: { businessName: before.businessName, type: before.type },
-      after: { businessName: data.businessName ?? before.businessName, type: data.type ?? before.type },
+      after: {
+        businessName: data.businessName ?? before.businessName,
+        type: data.type ?? before.type,
+      },
       request: req,
     });
     return this.getBusiness(before.id);
   }
 
   // ── Notification preferences ─────────────────────────────────────────────
-  async getNotifications(employerId: string | null): Promise<NotificationPrefsDto> {
+  async getNotifications(
+    employerId: string | null,
+  ): Promise<NotificationPrefsDto> {
     const e = await this.requireEmployer(employerId);
     return {
       newApplication: e.notifyOnNewApplication,
@@ -88,9 +94,15 @@ export class SettingsService {
     await this.prisma.employer.update({
       where: { id: e.id },
       data: {
-        ...(body.newApplication !== undefined ? { notifyOnNewApplication: body.newApplication } : {}),
-        ...(body.clockEvents !== undefined ? { notifyOnClockEvents: body.clockEvents } : {}),
-        ...(body.paymentEvents !== undefined ? { notifyOnPaymentEvents: body.paymentEvents } : {}),
+        ...(body.newApplication !== undefined
+          ? { notifyOnNewApplication: body.newApplication }
+          : {}),
+        ...(body.clockEvents !== undefined
+          ? { notifyOnClockEvents: body.clockEvents }
+          : {}),
+        ...(body.paymentEvents !== undefined
+          ? { notifyOnPaymentEvents: body.paymentEvents }
+          : {}),
       },
     });
     return this.getNotifications(e.id);
@@ -104,6 +116,14 @@ export class SettingsService {
       walletId: e.squadWalletId ?? null,
       walletBalanceNaira: e.walletBalanceNaira,
       payoutsPaused: e.payoutsPaused,
+      virtualAccount:
+        e.squadVirtualAccountNumber && e.squadVirtualAccountBankCode
+          ? {
+              number: e.squadVirtualAccountNumber,
+              bankCode: e.squadVirtualAccountBankCode,
+              accountName: e.squadVirtualAccountName ?? '',
+            }
+          : null,
     };
   }
 
@@ -148,7 +168,9 @@ export class SettingsService {
       where: { id: e.id },
       data: {
         ...(body.plan !== undefined ? { plan: body.plan } : {}),
-        ...(body.invoicingEmail !== undefined ? { invoicingEmail: body.invoicingEmail } : {}),
+        ...(body.invoicingEmail !== undefined
+          ? { invoicingEmail: body.invoicingEmail }
+          : {}),
       },
     });
     return this.getBilling(e.id);
@@ -157,9 +179,15 @@ export class SettingsService {
   // ── Helpers ──────────────────────────────────────────────────────────────
   private async requireEmployer(employerId: string | null) {
     if (!employerId) {
-      throw new AppError(403, 'NO_EMPLOYER_SCOPE', 'This account is not bound to a business.');
+      throw new AppError(
+        403,
+        'NO_EMPLOYER_SCOPE',
+        'This account is not bound to a business.',
+      );
     }
-    const e = await this.prisma.employer.findUnique({ where: { id: employerId } });
+    const e = await this.prisma.employer.findUnique({
+      where: { id: employerId },
+    });
     if (!e || e.deletedAt) {
       throw new AppError(404, 'NOT_FOUND', 'Employer not found.');
     }

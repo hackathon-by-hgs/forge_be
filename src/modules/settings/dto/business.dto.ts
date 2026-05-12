@@ -29,7 +29,10 @@ export class BusinessProfileDto {
   @ApiPropertyOptional({ example: '+2348011112222', nullable: true })
   phoneNumber?: string | null;
 
-  @ApiPropertyOptional({ example: 'https://cdn.forge.app/logos/emp_0001.png', nullable: true })
+  @ApiPropertyOptional({
+    example: 'https://cdn.forge.app/logos/emp_0001.png',
+    nullable: true,
+  })
   photoUrl?: string | null;
 
   @ApiProperty({ type: BusinessLocationDto })
@@ -91,6 +94,17 @@ export class UpdateNotificationPrefsDto {
   paymentEvents?: boolean;
 }
 
+export class SquadVirtualAccountDto {
+  @ApiProperty({ example: '9912345678' })
+  number!: string;
+
+  @ApiProperty({ example: '058' })
+  bankCode!: string;
+
+  @ApiProperty({ example: 'Forge Test Acme Logistics' })
+  accountName!: string;
+}
+
 export class SquadStatusDto {
   @ApiProperty({ example: true })
   connected!: boolean;
@@ -103,6 +117,14 @@ export class SquadStatusDto {
 
   @ApiProperty({ example: false })
   payoutsPaused!: boolean;
+
+  @ApiPropertyOptional({
+    type: SquadVirtualAccountDto,
+    nullable: true,
+    description:
+      'Squad virtual NUBAN — external bank transfers to this account credit the wallet. Null while provisioning pending.',
+  })
+  virtualAccount?: SquadVirtualAccountDto | null;
 }
 
 export class BillingDto {
