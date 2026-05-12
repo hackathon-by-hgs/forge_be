@@ -309,10 +309,14 @@ export class EmployerJobsService {
     const dbType = mapDashboardTypeToDbValues(body.type)[0]; // pick canonical DB value for write
     const id = newId(ID_PREFIXES.job);
     const status = body.postNow ? 'open' : 'draft';
-    // Wire format is km; DB column is meters.
+    // Wire format is km; DB column is meters. `geofenceRadiusMeters` is a
+    // DEPRECATED alias (historical FE field name carrying km values despite
+    // the misnomer) — `geofenceRadiusKm` wins when both are present.
+    const geofenceKm =
+      body.geofenceRadiusKm ?? body.geofenceRadiusMeters;
     const geofenceRadius =
-      body.geofenceRadiusKm !== undefined
-        ? Math.round(body.geofenceRadiusKm * 1000)
+      geofenceKm !== undefined
+        ? Math.round(geofenceKm * 1000)
         : this.config.get<number>('rules.geofenceDefaultRadiusM')!;
 
     const created = await this.prisma.$transaction(async (tx) => {
@@ -429,8 +433,13 @@ export class EmployerJobsService {
       data.state = body.location.state?.trim() || null;
       data.city = body.location.city?.trim() || null;
     }
-    if (body.geofenceRadiusKm !== undefined)
-      data.geofenceRadiusMeters = Math.round(body.geofenceRadiusKm * 1000);
+    // `geofenceRadiusKm` is canonical; `geofenceRadiusMeters` accepted as a
+    // deprecated alias carrying km values (legacy FE name).
+    const geofenceKmIn =
+      body.geofenceRadiusKm ?? body.geofenceRadiusMeters;
+    if (geofenceKmIn !== undefined) {
+      data.geofenceRadiusMeters = Math.round(geofenceKmIn * 1000);
+    }
     if (body.audience !== undefined) data.audience = body.audience;
     if (body.scheduledStartAt !== undefined)
       data.startTime = new Date(body.scheduledStartAt);

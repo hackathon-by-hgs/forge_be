@@ -156,6 +156,27 @@ export class CreateJobDto {
   @Max(50)
   geofenceRadiusKm?: number;
 
+  /**
+   * **DEPRECATED** alias for `geofenceRadiusKm`. The FE historically sent
+   * this field-name with km values (a misnomer); accepting both so existing
+   * mobile / dashboard builds keep working through the rename. If both are
+   * sent, `geofenceRadiusKm` wins. Drop this once every FE is on
+   * `geofenceRadiusKm`.
+   */
+  @ApiPropertyOptional({
+    deprecated: true,
+    description:
+      'DEPRECATED alias — same units as `geofenceRadiusKm` (kilometers, despite the historical name). Prefer `geofenceRadiusKm`.',
+    minimum: 0.01,
+    maximum: 50,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  @Max(50)
+  geofenceRadiusMeters?: number;
+
   @ApiProperty({ enum: JobAudience, default: JobAudience.Public })
   @IsEnum(JobAudience)
   audience!: JobAudience;
@@ -230,6 +251,21 @@ export class UpdateJobDto {
   @Min(0.01)
   @Max(50)
   geofenceRadiusKm?: number;
+
+  /** DEPRECATED alias — same units as `geofenceRadiusKm`. See CreateJobDto. */
+  @ApiPropertyOptional({
+    deprecated: true,
+    minimum: 0.01,
+    maximum: 50,
+    description:
+      'DEPRECATED alias — kilometers, despite the historical name. Prefer `geofenceRadiusKm`.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  @Max(50)
+  geofenceRadiusMeters?: number;
 
   @ApiPropertyOptional({ enum: JobAudience })
   @IsOptional()
