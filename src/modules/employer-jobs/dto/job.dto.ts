@@ -31,11 +31,31 @@ export class JobLocationDto {
   @ApiProperty({ example: 3.3608 })
   lng!: number;
 
-  @ApiProperty({ example: '14 Wharf Road, Apapa, Lagos' })
+  @ApiProperty({ example: '14 Wharf Road, Apapa, Lagos 102273, Nigeria' })
   address!: string;
 
-  @ApiPropertyOptional({ example: 'Apapa', nullable: true })
+  @ApiPropertyOptional({
+    example: 'Apapa',
+    nullable: true,
+    description:
+      'Area / neighborhood label. Free-form post Phase 4.6 — may be the picker name OR the city the worker typed.',
+  })
   neighborhood?: string | null;
+
+  @ApiPropertyOptional({
+    example: 'Lagos',
+    nullable: true,
+    description:
+      'One of the 36 Nigerian states or "FCT (Abuja)". Null for legacy / preset-area rows.',
+  })
+  state?: string | null;
+
+  @ApiPropertyOptional({
+    example: 'Lagos',
+    nullable: true,
+    description: 'City or town. Null for legacy / preset-area rows.',
+  })
+  city?: string | null;
 }
 
 /**

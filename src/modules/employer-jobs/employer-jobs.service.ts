@@ -326,7 +326,9 @@ export class EmployerJobsService {
           lat: body.location.lat,
           lng: body.location.lng,
           address: body.location.address.trim(),
-          neighborhood: body.location.neighborhood?.trim() ?? null,
+          neighborhood: body.location.neighborhood?.trim() || null,
+          state: body.location.state?.trim() || null,
+          city: body.location.city?.trim() || null,
           geofenceRadiusMeters: geofenceRadius,
           startTime: new Date(body.scheduledStartAt),
           requiredEquipment: body.requiredEquipment ?? [],
@@ -421,7 +423,9 @@ export class EmployerJobsService {
       data.lat = body.location.lat;
       data.lng = body.location.lng;
       data.address = body.location.address.trim();
-      data.neighborhood = body.location.neighborhood?.trim() ?? null;
+      data.neighborhood = body.location.neighborhood?.trim() || null;
+      data.state = body.location.state?.trim() || null;
+      data.city = body.location.city?.trim() || null;
     }
     if (body.geofenceRadiusMeters !== undefined)
       data.geofenceRadiusMeters = body.geofenceRadiusMeters;
@@ -897,6 +901,8 @@ export class EmployerJobsService {
       'payNaira',
       'durationHours',
       'neighborhood',
+      'state',
+      'city',
       'address',
       'scheduledStartAt',
       'postedAt',
@@ -926,6 +932,8 @@ export class EmployerJobsService {
           String(dash.payNaira),
           String(dash.durationHours),
           dash.location.neighborhood ?? '',
+          dash.location.state ?? '',
+          dash.location.city ?? '',
           dash.location.address,
           dash.scheduledStartAt,
           dash.postedAt,
@@ -979,10 +987,18 @@ export class EmployerJobsService {
     if (q.neighborhood) {
       where.neighborhood = { equals: q.neighborhood, mode: 'insensitive' };
     }
+    if (q.state) {
+      where.state = { equals: q.state, mode: 'insensitive' };
+    }
+    if (q.city) {
+      where.city = { equals: q.city, mode: 'insensitive' };
+    }
     if (q.q) {
       where.OR = [
         { title: { contains: q.q, mode: 'insensitive' } },
         { neighborhood: { contains: q.q, mode: 'insensitive' } },
+        { city: { contains: q.q, mode: 'insensitive' } },
+        { state: { contains: q.q, mode: 'insensitive' } },
         { id: { equals: q.q } },
       ];
     }

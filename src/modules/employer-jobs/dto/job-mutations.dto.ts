@@ -23,6 +23,46 @@ export enum JobAudience {
   TeamFirst = 'team_first',
 }
 
+/**
+ * One of the 36 Nigerian states or "FCT (Abuja)". Lowercased keys so the FE
+ * can drop in whatever casing the user typed in the picker and we accept it
+ * without bikeshedding "Lagos" vs "lagos". The persisted value preserves the
+ * caller's casing — we only use this set to gate the `state` field through
+ * an enum check.
+ */
+const NIGERIAN_STATES: ReadonlySet<string> = new Set([
+  'abia', 'adamawa', 'akwa ibom', 'anambra', 'bauchi', 'bayelsa', 'benue',
+  'borno', 'cross river', 'delta', 'ebonyi', 'edo', 'ekiti', 'enugu', 'gombe',
+  'imo', 'jigawa', 'kaduna', 'kano', 'katsina', 'kebbi', 'kogi', 'kwara',
+  'lagos', 'nasarawa', 'niger', 'ogun', 'ondo', 'osun', 'oyo', 'plateau',
+  'rivers', 'sokoto', 'taraba', 'yobe', 'zamfara',
+  // FCT — accept several casings the FE picker may surface.
+  'fct', 'fct (abuja)', 'abuja',
+]);
+
+import { registerDecorator, ValidationOptions } from 'class-validator';
+
+function IsNigerianState(validationOptions?: ValidationOptions) {
+  return function (object: object, propertyName: string) {
+    registerDecorator({
+      name: 'isNigerianState',
+      target: object.constructor,
+      propertyName,
+      options: validationOptions,
+      validator: {
+        validate(value: unknown): boolean {
+          if (value === null || value === undefined || value === '') return true;
+          if (typeof value !== 'string') return false;
+          return NIGERIAN_STATES.has(value.trim().toLowerCase());
+        },
+        defaultMessage(): string {
+          return 'state must be one of the 36 Nigerian states or "FCT (Abuja)".';
+        },
+      },
+    });
+  };
+}
+
 export class JobLocationInputDto {
   @ApiProperty({ example: 6.4458 })
   @IsLatitude()
@@ -32,16 +72,40 @@ export class JobLocationInputDto {
   @IsLongitude()
   lng!: number;
 
-  @ApiProperty({ example: '14 Wharf Road, Apapa, Lagos' })
+  @ApiProperty({ example: '14 Wharf Road, Apapa, Lagos 102273, Nigeria' })
   @IsString()
   @Length(5, 200)
   address!: string;
 
-  @ApiPropertyOptional({ example: 'Apapa' })
+  @ApiPropertyOptional({
+    example: 'Apapa',
+    description:
+      'Free-form area / neighborhood label. Previously constrained to ~75 preset names; now any user-typed string up to 120 chars (FE Phase 4.6).',
+  })
   @IsOptional()
   @IsString()
-  @Length(2, 80)
+  @Length(0, 120)
   neighborhood?: string;
+
+  @ApiPropertyOptional({
+    example: 'Lagos',
+    description:
+      'One of the 36 Nigerian states or "FCT (Abuja)". Optional; FE populates when the picker hits "Other" (Google Places / geolocation auto-fill).',
+  })
+  @IsOptional()
+  @IsString()
+  @Length(2, 60)
+  @IsNigerianState()
+  state?: string;
+
+  @ApiPropertyOptional({
+    example: 'Lagos',
+    description: 'City or town within the state. Free text, optional.',
+  })
+  @IsOptional()
+  @IsString()
+  @Length(2, 120)
+  city?: string;
 }
 
 export class CreateJobDto {

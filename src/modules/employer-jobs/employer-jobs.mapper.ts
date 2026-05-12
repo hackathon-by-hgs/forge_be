@@ -69,6 +69,8 @@ export interface DashboardJob {
     lng: number;
     address: string;
     neighborhood: string | null;
+    state: string | null;
+    city: string | null;
   };
   geofenceRadiusMeters: number;
   status: string;
@@ -106,6 +108,8 @@ export function toDashboardJob(j: Job, assignedWorker?: Worker | null): Dashboar
       lng: j.lng,
       address: j.address,
       neighborhood: j.neighborhood ?? null,
+      state: j.state ?? null,
+      city: j.city ?? null,
     },
     geofenceRadiusMeters: j.geofenceRadiusMeters,
     status: j.status,

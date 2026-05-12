@@ -58,6 +58,23 @@ export class JobsListQueryDto {
   @IsString()
   neighborhood?: string;
 
+  @ApiPropertyOptional({
+    example: 'Lagos',
+    description:
+      'Filter by NG state. Free string (no enum gate on read); only jobs whose `state` column matches case-insensitively are returned.',
+  })
+  @IsOptional()
+  @IsString()
+  state?: string;
+
+  @ApiPropertyOptional({
+    example: 'Lagos',
+    description: 'Filter by city. Free string, case-insensitive.',
+  })
+  @IsOptional()
+  @IsString()
+  city?: string;
+
   @ApiPropertyOptional({ description: 'Case-insensitive prefix match on title + neighborhood + id.' })
   @IsOptional()
   @IsString()

@@ -299,6 +299,11 @@ model Job {
   lng                   Float
   address               String
   neighborhood          String?
+  // Free-form location surface (FE Phase 4.6) — `state` is one of 36 NG states
+  // or "FCT (Abuja)"; `city` is free text. Both nullable: preset-area jobs
+  // still send only `neighborhood`, and legacy rows have no values.
+  state                 String?
+  city                  String?
   geofenceRadiusMeters  Int      @default(200) @map("geofence_radius_meters")
   startTime             DateTime @map("start_time")
   startedAt             DateTime? @map("started_at")
