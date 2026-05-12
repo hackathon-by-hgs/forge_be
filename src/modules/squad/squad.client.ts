@@ -47,6 +47,21 @@ export interface SquadVerifyOutcome {
   raw: Record<string, unknown>;
 }
 
+export interface SquadSmsInput {
+  /** Recipient phone (E.164 — `+234…`) or local Nigerian format (`080…`). Squad accepts both. */
+  to: string;
+  /** SMS body. Keep ≤ 160 chars to avoid concatenation cost. */
+  message: string;
+}
+
+export interface SquadSmsOutcome {
+  /** Whether Squad accepted the send (i.e. queued for delivery). Doesn't guarantee handset arrival. */
+  accepted: boolean;
+  /** Provider message-id when available. */
+  providerReference: string | null;
+  message: string;
+}
+
 export interface SquadSimulatePaymentInput {
   /** The NUBAN to credit (employer's or worker's `squadVirtualAccountNumber`). */
   accountNumber: string;
@@ -269,6 +284,54 @@ export class SquadClient {
   }
 
   /**
+   * Send an SMS via Squad's SMS service. Used today for OTP delivery during
+   * worker signup / login on the mobile app. Fails open — if Squad's SMS
+   * endpoint errors or times out, we log and return `{accepted: false}` but
+   * never throw, so the OTP challenge still gets created and the worker can
+   * request a resend.
+   *
+   * Stub mode returns success without sending. The OTP code is already logged
+   * to the BE console when `otp.debugExpose` is set, so dev signup keeps working.
+   */
+  async sendSms(input: SquadSmsInput): Promise<SquadSmsOutcome> {
+    if (this.isStub()) {
+      this.logger.log(
+        `[squad-stub] sms to=${input.to} body="${input.message.slice(0, 60)}${input.message.length > 60 ? '…' : ''}"`,
+      );
+      return {
+        accepted: true,
+        providerReference: `stub_sms_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+        message: 'Stubbed — no SMS dispatched.',
+      };
+    }
+    const senderId =
+      this.config.get<string | null>('squad.smsSenderId') ?? 'FORGE';
+    try {
+      const res = await this.post<{
+        status: number;
+        message: string;
+        data?: Record<string, unknown>;
+      }>('/sms/send', {
+        to: input.to,
+        message: input.message,
+        sender_id: senderId,
+      });
+      const ok = res.status >= 200 && res.status < 300;
+      const ref = pickString(res.data ?? {}, ['message_id', 'reference', 'id']);
+      if (!ok) {
+        this.logger.warn(
+          `[squad] sms send returned ${res.status} ${res.message} for to=${input.to}`,
+        );
+      }
+      return { accepted: ok, providerReference: ref, message: res.message };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`[squad] sms send failed for to=${input.to}: ${msg}`);
+      return { accepted: false, providerReference: null, message: msg };
+    }
+  }
+
+  /**
    * Simulate an inbound bank transfer to a virtual account. **Sandbox only.**
    * Squad's `POST /virtual-account/simulate/payment` endpoint pretends an
    * external transfer landed on the NUBAN — Squad then fires the funding
@@ -305,7 +368,7 @@ export class SquadClient {
       return {
         accepted: ok,
         message: res.message,
-        raw: (res.data ?? {}) as Record<string, unknown>,
+        raw: res.data ?? {},
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

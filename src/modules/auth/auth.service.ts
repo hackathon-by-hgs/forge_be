@@ -6,6 +6,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { toWorkerDto } from '../me/me.mapper';
+import { SquadClient } from '../squad/squad.client';
 import { VirtualAccountProvisioner } from '../squad/virtual-account-provisioner.service';
 import {
   OtpFlow,
@@ -28,6 +29,7 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly virtualAccount: VirtualAccountProvisioner,
+    private readonly squad: SquadClient,
   ) {}
 
   // ── OTP request ────────────────────────────────────────────────────────────
@@ -87,7 +89,23 @@ export class AuthService {
         `OTP for ${body.phone} (challenge ${challenge.id}): ${code}`,
       );
     }
-    // TODO: dispatch SMS via Termii / Twilio (sender id "FORGE").
+
+    // Dispatch via Squad SMS — fire-and-forget so a Squad SMS outage doesn't
+    // block OTP request. Stub mode logs + returns success. Real mode hits
+    // Squad's SMS endpoint; on failure the worker can request a resend.
+    const ttlMinutes = Math.max(1, Math.round(ttl / 60));
+    void this.squad
+      .sendSms({
+        to: body.phone,
+        message: `Your Forge code is ${code}. Expires in ${ttlMinutes} min. Don't share this code.`,
+      })
+      .then((outcome) => {
+        if (!outcome.accepted) {
+          this.logger.warn(
+            `[otp] sms dispatch reported not-accepted for ${body.phone}: ${outcome.message}`,
+          );
+        }
+      });
 
     return {
       challenge_id: challenge.id,

@@ -1,10 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { promises as fs } from 'fs';
-import { join, extname } from 'path';
+import { extname } from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
+import { StorageService } from '../../common/storage/storage.service';
 import { UploadPurpose } from './dto/upload.dto';
 
 const ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/heic']);
@@ -16,11 +16,19 @@ const MAX_BYTES: Record<UploadPurpose, number> = {
   [UploadPurpose.LivenessSelfie]: 12 * 1024 * 1024,
 };
 
+/** Per-purpose object key prefix in the R2 bucket. */
+const KEY_PREFIX: Record<UploadPurpose, string> = {
+  [UploadPurpose.WorkerAvatar]: 'avatars',
+  [UploadPurpose.ClockOutProof]: 'clock-out-proofs',
+  [UploadPurpose.LivenessSelfie]: 'liveness',
+};
+
 @Injectable()
 export class UploadsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly storage: StorageService,
   ) {}
 
   async store(
@@ -45,19 +53,17 @@ export class UploadsService {
       throw new AppError(413, 'FILE_TOO_LARGE', `File exceeds ${MAX_BYTES[purpose]} bytes.`);
     }
 
-    const dir = this.config.get<string>('uploads.dir')!;
-    const baseUrl = this.config.get<string>('uploads.publicBaseUrl')!;
     const ttlHours = this.config.get<number>('uploads.ttlHours')!;
-
     const id = newId(ID_PREFIXES.upload);
     const ext = extname(file.originalname || '') || mimeToExt(file.mimetype);
-    const filename = `${id}${ext}`;
-    const filePath = join(dir, filename);
+    const key = `${KEY_PREFIX[purpose]}/${id}${ext}`;
 
-    await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(filePath, file.buffer);
+    const stored = await this.storage.put({
+      key,
+      body: file.buffer,
+      contentType: file.mimetype,
+    });
 
-    const url = `${baseUrl}/${filename}`;
     const expiresAt = new Date(Date.now() + ttlHours * 3600 * 1000);
 
     await this.prisma.upload.create({
@@ -65,15 +71,17 @@ export class UploadsService {
         id,
         workerId,
         purpose,
-        filePath,
+        // `filePath` is the storage key (R2 object key or flattened local
+        // filename). Used by remove() for TTL sweeps + NDPR wipe.
+        filePath: stored.key,
         mimeType: file.mimetype,
         sizeBytes: file.size,
-        url,
+        url: stored.url,
         expiresAt,
       },
     });
 
-    return { upload_id: id, url, expires_at: expiresAt.toISOString() };
+    return { upload_id: id, url: stored.url, expires_at: expiresAt.toISOString() };
   }
 }
 

@@ -321,6 +321,7 @@ model Job {
   clockEvents    ClockEvent[]
   photoProofs    PhotoProof[]
   reviews        Review[]
+  summary        JobSummary?
 
   @@index([type])
   @@index([startTime])
@@ -823,4 +824,24 @@ model EmployerCreditHistory {
   @@unique([employerId, capturedAt])
   @@index([employerId, capturedAt(sort: Desc)])
   @@map("employer_credit_history")
+}
+
+
+// AI job summary cache — populated by `POST /ai/jobs/:id/summarize`.
+// 7-day TTL per ai.md; `schemaVersion` bumps invalidate every row.
+model JobSummary {
+  jobId          String   @id @map("job_id")
+  schemaVersion  Int      @map("schema_version")
+  summary        String
+  highlights     Json     @default("[]")
+  model          String
+  provider       String
+  elapsedMs      Int      @map("elapsed_ms")
+  createdAt      DateTime @default(now()) @map("created_at")
+  expiresAt      DateTime @map("expires_at")
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("job_summaries")
 }

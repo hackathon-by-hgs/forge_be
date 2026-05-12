@@ -29,6 +29,7 @@ import { EmployerCreditModule } from './modules/employer-credit/employer-credit.
 import { EmployerAnalyticsModule } from './modules/employer-analytics/employer-analytics.module';
 import { LifecycleModule } from './modules/lifecycle/lifecycle.module';
 import { StreamModule } from './modules/stream/stream.module';
+import { AiModule } from './modules/ai/ai.module';
 
 @Module({
   imports: [
@@ -38,7 +39,7 @@ import { StreamModule } from './modules/stream/stream.module';
     CommonModule,
 
     // Worker mobile API
-    AuthModule, 
+    AuthModule,
     JobsModule,
     WalletModule,
     LoansModule,
@@ -67,6 +68,9 @@ import { StreamModule } from './modules/stream/stream.module';
 
     // SSE /v1/stream — real-time invalidation hints for the dashboards.
     StreamModule,
+
+    // AI surfaces (`ai.md`).
+    AiModule,
   ],
   controllers: [AppController],
   providers: [AppService],
