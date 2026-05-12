@@ -47,6 +47,20 @@ export interface SquadVerifyOutcome {
   raw: Record<string, unknown>;
 }
 
+export interface SquadSimulatePaymentInput {
+  /** The NUBAN to credit (employer's or worker's `squadVirtualAccountNumber`). */
+  accountNumber: string;
+  /** Amount in integer Naira (Squad's simulate endpoint accepts the amount as a string). */
+  amountNaira: number;
+}
+
+export interface SquadSimulatePaymentOutcome {
+  /** Whether Squad accepted the simulate request. The funding webhook is what actually credits. */
+  accepted: boolean;
+  message: string;
+  raw: Record<string, unknown>;
+}
+
 export interface SquadAccountResolveInput {
   /** NIBSS bank code (e.g. "058" GTBank). */
   bankCode: string;
@@ -251,6 +265,54 @@ export class SquadClient {
         providerReference: null,
         raw: { error: msg },
       };
+    }
+  }
+
+  /**
+   * Simulate an inbound bank transfer to a virtual account. **Sandbox only.**
+   * Squad's `POST /virtual-account/simulate/payment` endpoint pretends an
+   * external transfer landed on the NUBAN — Squad then fires the funding
+   * webhook (`virtual_account.funding` event) which our `handleVirtualAccountFunding`
+   * webhook handler picks up and credits the matching employer/worker wallet.
+   *
+   * In stub mode the BE has no Squad to call; the caller (top-up service) is
+   * expected to credit the wallet directly when this returns `accepted: true`
+   * because no webhook will fire.
+   */
+  async simulateVirtualAccountPayment(
+    input: SquadSimulatePaymentInput,
+  ): Promise<SquadSimulatePaymentOutcome> {
+    if (this.isStub()) {
+      this.logger.log(
+        `[squad-stub] simulate-payment account=${input.accountNumber} amount=₦${input.amountNaira} (caller must credit wallet directly — no webhook will fire)`,
+      );
+      return {
+        accepted: true,
+        message: 'Stubbed — caller is responsible for crediting the wallet.',
+        raw: { stub: true },
+      };
+    }
+    try {
+      const res = await this.post<{
+        status: number;
+        message: string;
+        data?: Record<string, unknown>;
+      }>('/virtual-account/simulate/payment', {
+        virtual_account_number: input.accountNumber,
+        amount: String(input.amountNaira),
+      });
+      const ok = res.status >= 200 && res.status < 300;
+      return {
+        accepted: ok,
+        message: res.message,
+        raw: (res.data ?? {}) as Record<string, unknown>,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `[squad] simulate-payment failed account=${input.accountNumber}: ${msg}`,
+      );
+      return { accepted: false, message: msg, raw: { error: msg } };
     }
   }
 

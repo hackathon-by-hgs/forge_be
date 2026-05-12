@@ -78,18 +78,56 @@ export class TopUpDto {
   description?: string;
 }
 
-export class TopUpResponseDto {
-  @ApiProperty({ example: 'https://checkout.squadco.com/dev/checkout?ref=top_8a3f2c' })
-  checkoutUrl!: string;
+export enum TopUpMode {
+  /** Squad sandbox simulate-payment fired; wallet will credit when the funding webhook lands (1–5 s). */
+  Simulated = 'simulated',
+  /** No Squad keys configured; BE credited the wallet directly. The `walletBalanceNaira` on the response is the post-credit balance. */
+  StubCredited = 'stub_credited',
+  /** Production hosted-checkout link issued; FE should redirect/iframe the URL. Wallet credits when the webhook fires post-payment. */
+  Checkout = 'checkout',
+}
 
-  @ApiProperty({ example: 'top_8a3f2c', description: 'Squad checkout reference. Surfaces on the webhook.' })
-  checkoutReference!: string;
+export class TopUpResponseDto {
+  @ApiProperty({
+    enum: TopUpMode,
+    description:
+      'Which path the BE took. FE switches on this — `simulated` toasts + waits for SSE, `stub_credited` updates wallet optimistically, `checkout` redirects to `checkoutUrl`.',
+  })
+  mode!: TopUpMode;
+
+  @ApiProperty({ example: 'txn_8a3f2c1b', description: 'The Transaction row that mirrors this top-up.' })
+  transactionId!: string;
 
   @ApiProperty({ example: 100000 })
   amountNaira!: number;
 
-  @ApiProperty({ example: '2026-05-10T14:30:00+01:00', description: 'When the checkout link expires (15 min).' })
-  expiresAt!: string;
+  @ApiPropertyOptional({
+    example: 'https://checkout.squadco.com/checkout/v1/abc123',
+    nullable: true,
+    description: 'Only set when `mode = checkout` (production). Open this in a popup or iframe.',
+  })
+  checkoutUrl?: string | null;
+
+  @ApiPropertyOptional({
+    example: 'top_8a3f2c',
+    nullable: true,
+    description: 'Squad reference echoed on the funding/checkout webhook. Useful for support traceability.',
+  })
+  checkoutReference?: string | null;
+
+  @ApiPropertyOptional({
+    example: '2026-05-10T14:30:00+01:00',
+    nullable: true,
+    description: 'When the checkout link expires (15 min). Only set when `mode = checkout`.',
+  })
+  expiresAt?: string | null;
+
+  @ApiPropertyOptional({
+    example: 945000,
+    nullable: true,
+    description: 'Post-credit wallet balance. Only set when `mode = stub_credited` (BE credited synchronously).',
+  })
+  walletBalanceNaira?: number | null;
 }
 
 export class PayoutsPauseStatusDto {

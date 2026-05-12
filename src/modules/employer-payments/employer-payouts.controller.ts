@@ -103,15 +103,18 @@ export class EmployerPayoutsController {
   @HttpCode(HttpStatus.CREATED)
   @Roles(Role.BusinessOwner, Role.BusinessAdmin)
   @ApiOperation({
-    summary: 'Initiate a Squad wallet top-up. Returns a Squad checkout URL.',
+    summary:
+      'Initiate a wallet top-up. Branches on environment (sandbox → simulate-payment, production → hosted checkout).',
     description: [
       '**Audience:** Employer-web. Owner + admin only.',
-      '**Powers:** "Top up wallet" CTA on `/payments/payouts`. The FE redirects to `checkoutUrl` (window.location.assign).',
+      '**Powers:** "Top up wallet" CTA on `/payments/payouts` and the overview.',
       '',
-      '**Demo behaviour:** The endpoint returns a deterministic-looking but non-functional Squad checkout URL ',
-      '(`https://checkout.squadco.com/dev/checkout?ref=…`). No real money moves. The FE can still wire the full ',
-      'redirect flow — when Phase 5 lands and Squad is sandbox-wired, the same endpoint will mint a real checkout ',
-      'URL and the FE needs no change.',
+      '**Response shape carries a `mode` discriminator** — the FE branches on it:',
+      '- `simulated` (sandbox + real Squad keys): Squad fires the funding webhook in 1–5 s; wallet credits via the existing `transaction.updated` SSE event. FE toasts "Top-up sent, your wallet will update shortly."',
+      '- `stub_credited` (sandbox + no Squad keys): BE credited the wallet synchronously. Response carries the post-credit `walletBalanceNaira`. FE updates optimistically and dismisses.',
+      '- `checkout` (production): response carries a real Squad-hosted `checkoutUrl`. FE redirects or iframes it; the user pays; the webhook credits the wallet.',
+      '',
+      '**Idempotency:** every call writes a `Transaction(kind=top_up, status=processing)` row keyed on `squadReference` before doing any external work, so webhook delivery + reconciliation cron can advance it idempotently.',
     ].join('\n\n'),
   })
   @ApiBody({ type: TopUpDto })
