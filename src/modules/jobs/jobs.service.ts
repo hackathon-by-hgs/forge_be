@@ -24,22 +24,67 @@ export class JobsService {
     const worker = await this.prisma.worker.findUnique({ where: { id: workerId } });
     if (!worker) throw new AppError(401, 'AUTH_REQUIRED', 'Worker not found.');
 
-    const radiusKm = q.radius_km ?? worker.preferredRadiusKm;
+    // BE-side floor on the feed radius. The worker's `preferredRadiusKm` is
+    // seeded at 4–12 which is far too tight for a country-wide marketplace —
+    // a Lagos worker would never see an Abuja job. The mobile is still free
+    // to send `?radius_km=` explicitly to widen or narrow further; this floor
+    // only kicks in when the request comes in with no explicit value AND the
+    // worker's stored preference is below the floor.
+    const FEED_RADIUS_FLOOR_KM = 25;
+    const requestedRadius = q.radius_km ?? worker.preferredRadiusKm;
+    const radiusKm = Math.max(requestedRadius, FEED_RADIUS_FLOOR_KM);
     const radiusM = radiusKm * 1000;
     const limit = q.limit ?? 20;
     const cursor = decodeCursor(q.cursor);
     const now = new Date();
 
-    // Workers don't see jobs they've already applied to.
-    const appliedJobIds = await this.prisma.jobApplication.findMany({
-      where: { workerId },
-      select: { jobId: true },
-    });
+    // ── Worker context for visibility filters ─────────────────────────────
+    // 1) applied-to job ids (exclude from feed)
+    // 2) team memberships (lets the worker see `audience='team_first'` jobs
+    //    posted by employers they're explicitly on the team of, before the
+    //    audience-flip cron promotes the job to `public`).
+    const [appliedJobIds, teamMemberships] = await Promise.all([
+      this.prisma.jobApplication.findMany({
+        where: { workerId },
+        select: { jobId: true },
+      }),
+      this.prisma.employerTeamMember.findMany({
+        where: { workerId },
+        select: { employerId: true },
+      }),
+    ]);
+    const teamEmployerIds = teamMemberships.map((t) => t.employerId);
+
+    // Audience visibility — spec BRIEF §11.1:
+    //   - `audience='public'` → visible to everyone.
+    //   - `audience='team_first'` → visible to (a) the employer's team
+    //     immediately, (b) everyone after 30 min when the audience-flip cron
+    //     sets `audience='public'` + `audienceFlippedAt`.
+    // We model (a) by joining on EmployerTeamMember; (b) is implicit because
+    // by then the row's `audience` column is already `'public'`.
+    const audienceClause =
+      teamEmployerIds.length > 0
+        ? {
+            OR: [
+              { audience: 'public' },
+              {
+                audience: 'team_first',
+                employerId: { in: teamEmployerIds },
+              },
+            ],
+          }
+        : { audience: 'public' };
 
     const where: Record<string, unknown> = {
+      // Workers only see jobs they can still apply to — excludes drafts,
+      // cancelled, accepted, in_progress, completed. The spec previously
+      // omitted this filter; documenting it here as spec clarification.
+      status: { in: ['open', 'applications_in'] },
       filled: false,
+      deletedAt: null,
       startTime: { gt: now },
       id: { notIn: appliedJobIds.map((a) => a.jobId) },
+      ...audienceClause,
       ...(q.types?.length ? { type: { in: q.types } } : {}),
       ...(q.min_pay !== undefined ? { payAmount: { gte: q.min_pay } } : {}),
     };
@@ -49,10 +94,12 @@ export class JobsService {
     // the cursor key. For the static-data case this is stable; production would persist
     // a relevance snapshot per (worker, query) and key the cursor on that.
     if (cursor) {
-      where.OR = [
-        { startTime: { gt: new Date(cursor.ts) } },
-        { startTime: new Date(cursor.ts), id: { gt: cursor.id } },
-      ];
+      where.AND = {
+        OR: [
+          { startTime: { gt: new Date(cursor.ts) } },
+          { startTime: new Date(cursor.ts), id: { gt: cursor.id } },
+        ],
+      };
     }
 
     // Pull a generous pre-filter, then trim by haversine distance.

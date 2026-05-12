@@ -501,9 +501,6 @@ async function seedJobs(): Promise<JobInsert[]> {
     const coords = NEIGHBORHOOD_COORDS[neighborhood];
     const lat = coords.lat + rangeFloat(rng, -0.01, 0.01);
     const lng = coords.lng + rangeFloat(rng, -0.01, 0.01);
-    const daysAgo = range(rng, 0, 90);
-    const postedAt = subDays(new Date(), daysAgo);
-    const start = subHours(postedAt, -range(rng, 1, 48));
     const durationHours = range(rng, 2, 8);
 
     // Bias the first 8 jobs to "live" states for an interesting Overview.
@@ -511,6 +508,29 @@ async function seedJobs(): Promise<JobInsert[]> {
     else if (i === 3) status = 'pending_verification';
     else if (i < 6) status = 'applications_in';
     else if (i < 8) status = 'open';
+
+    // `open` / `applications_in` / `draft` jobs must have a FUTURE `startTime`
+    // so the worker-mobile feed (which filters `startTime > now`) actually
+    // surfaces them. `in_progress` / `pending_verification` / `completed` /
+    // `cancelled` keep historical timestamps so the dashboard's overview +
+    // analytics charts still see realistic activity.
+    const isFutureFacingStatus =
+      status === 'open' ||
+      status === 'applications_in' ||
+      status === 'draft';
+    const now = new Date();
+    let postedAt: Date;
+    let start: Date;
+    if (isFutureFacingStatus) {
+      const hoursFromNow = range(rng, 2, 168); // 2 hours to 7 days out
+      start = addHours(now, hoursFromNow);
+      // Posted 1–72 hours before scheduled start — feels natural on the feed.
+      postedAt = subHours(start, range(rng, 1, 72));
+    } else {
+      const daysAgo = range(rng, 0, 90);
+      postedAt = subDays(now, daysAgo);
+      start = subHours(postedAt, -range(rng, 1, 48));
+    }
 
     const assigned =
       status === 'accepted' ||
