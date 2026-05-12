@@ -309,9 +309,11 @@ export class EmployerJobsService {
     const dbType = mapDashboardTypeToDbValues(body.type)[0]; // pick canonical DB value for write
     const id = newId(ID_PREFIXES.job);
     const status = body.postNow ? 'open' : 'draft';
+    // Wire format is km; DB column is meters.
     const geofenceRadius =
-      body.geofenceRadiusMeters ??
-      this.config.get<number>('rules.geofenceDefaultRadiusM')!;
+      body.geofenceRadiusKm !== undefined
+        ? Math.round(body.geofenceRadiusKm * 1000)
+        : this.config.get<number>('rules.geofenceDefaultRadiusM')!;
 
     const created = await this.prisma.$transaction(async (tx) => {
       const job = await tx.job.create({
@@ -427,8 +429,8 @@ export class EmployerJobsService {
       data.state = body.location.state?.trim() || null;
       data.city = body.location.city?.trim() || null;
     }
-    if (body.geofenceRadiusMeters !== undefined)
-      data.geofenceRadiusMeters = body.geofenceRadiusMeters;
+    if (body.geofenceRadiusKm !== undefined)
+      data.geofenceRadiusMeters = Math.round(body.geofenceRadiusKm * 1000);
     if (body.audience !== undefined) data.audience = body.audience;
     if (body.scheduledStartAt !== undefined)
       data.startTime = new Date(body.scheduledStartAt);

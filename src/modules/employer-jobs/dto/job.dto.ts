@@ -102,8 +102,12 @@ export class JobDto {
   @ApiProperty({ type: JobLocationDto })
   location!: JobLocationDto;
 
-  @ApiProperty({ example: 200 })
-  geofenceRadiusMeters!: number;
+  @ApiProperty({
+    example: 0.2,
+    description:
+      'Clock-in geofence radius, in KILOMETERS. The DB persists meters internally for haversine math; the wire format is km for FE convenience. Fractional values OK (e.g. 0.05 km = 50 m).',
+  })
+  geofenceRadiusKm!: number;
 
   @ApiProperty({ enum: DashboardJobStatusEnum })
   status!: DashboardJobStatusEnum;

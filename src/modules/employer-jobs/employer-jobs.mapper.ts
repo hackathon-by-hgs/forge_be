@@ -72,7 +72,7 @@ export interface DashboardJob {
     state: string | null;
     city: string | null;
   };
-  geofenceRadiusMeters: number;
+  geofenceRadiusKm: number;
   status: string;
   audience: string;
   audienceFlippedAt: string | null;
@@ -111,7 +111,9 @@ export function toDashboardJob(j: Job, assignedWorker?: Worker | null): Dashboar
       state: j.state ?? null,
       city: j.city ?? null,
     },
-    geofenceRadiusMeters: j.geofenceRadiusMeters,
+    // DB stores meters (haversine math is meter-based). Wire format is km
+    // for FE convenience — convert at the boundary.
+    geofenceRadiusKm: j.geofenceRadiusMeters / 1000,
     status: j.status,
     audience: j.audience,
     audienceFlippedAt: j.audienceFlippedAt ? j.audienceFlippedAt.toISOString() : null,

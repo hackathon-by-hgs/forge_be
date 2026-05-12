@@ -9,6 +9,7 @@ import {
   IsInt,
   IsLatitude,
   IsLongitude,
+  IsNumber,
   IsOptional,
   IsString,
   Length,
@@ -141,13 +142,19 @@ export class CreateJobDto {
   @Type(() => JobLocationInputDto)
   location!: JobLocationInputDto;
 
-  @ApiPropertyOptional({ default: 200, minimum: 50, maximum: 2000 })
+  @ApiPropertyOptional({
+    default: 0.2,
+    minimum: 0.01,
+    maximum: 50,
+    description:
+      'Clock-in geofence radius in KILOMETERS. The worker must be within this distance of the job lat/lng to clock in. Range: 0.01 km (10 m, single-room) to 50 km (citywide). Default 0.2 km (200 m) matches a typical warehouse / wharf. Fractional values OK.',
+  })
   @IsOptional()
   @Type(() => Number)
-  @IsInt()
-  @Min(50)
-  @Max(2000)
-  geofenceRadiusMeters?: number;
+  @IsNumber()
+  @Min(0.01)
+  @Max(50)
+  geofenceRadiusKm?: number;
 
   @ApiProperty({ enum: JobAudience, default: JobAudience.Public })
   @IsEnum(JobAudience)
@@ -212,13 +219,17 @@ export class UpdateJobDto {
   @Type(() => JobLocationInputDto)
   location?: JobLocationInputDto;
 
-  @ApiPropertyOptional({ minimum: 50, maximum: 2000 })
+  @ApiPropertyOptional({
+    minimum: 0.01,
+    maximum: 50,
+    description: 'Kilometers. Range 0.01–50.',
+  })
   @IsOptional()
   @Type(() => Number)
-  @IsInt()
-  @Min(50)
-  @Max(2000)
-  geofenceRadiusMeters?: number;
+  @IsNumber()
+  @Min(0.01)
+  @Max(50)
+  geofenceRadiusKm?: number;
 
   @ApiPropertyOptional({ enum: JobAudience })
   @IsOptional()
