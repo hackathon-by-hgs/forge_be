@@ -416,6 +416,25 @@ export class EmployerJobsService {
       request: req,
     });
 
+    // §24b — fire `new_job` push to every nearby worker who's opted in.
+    // Drafts (`postNow=false`) skip — workers shouldn't see jobs that
+    // aren't live yet. Best-effort; never blocks the response.
+    if (created.status === 'open') {
+      void this.fanOutNewJobPush({
+        id: created.id,
+        employerId: created.employerId,
+        title: created.title,
+        type: created.type,
+        payAmount: created.payAmount,
+        durationHours: created.durationHours,
+        address: created.address,
+        lat: created.lat,
+        lng: created.lng,
+        audience: created.audience,
+        audienceFlippedAt: created.audienceFlippedAt,
+      });
+    }
+
     return toDashboardJob(created, created.assignedWorker) as JobDto;
   }
 
@@ -553,6 +572,21 @@ export class EmployerJobsService {
       before: { status: 'draft' },
       after: { status: 'open', reservedNaira: before.payAmount },
       request: req,
+    });
+
+    // §24b — same `new_job` fan-out as the `create(postNow=true)` path.
+    void this.fanOutNewJobPush({
+      id: updated.id,
+      employerId: updated.employerId,
+      title: updated.title,
+      type: updated.type,
+      payAmount: updated.payAmount,
+      durationHours: updated.durationHours,
+      address: updated.address,
+      lat: updated.lat,
+      lng: updated.lng,
+      audience: updated.audience,
+      audienceFlippedAt: updated.audienceFlippedAt,
     });
 
     return toDashboardJob(updated, updated.assignedWorker) as JobDto;
@@ -1029,6 +1063,116 @@ export class EmployerJobsService {
     });
     if (!job) throw new AppError(404, 'NOT_FOUND', 'Job not found.');
     return job;
+  }
+
+  /**
+   * §24b `new_job` fan-out — after a job lands in `open` status (via either
+   * the `create(postNow=true)` path or `publish()`), push to every worker
+   * whose `preferredRadiusKm` from their `home` covers the job's location.
+   *
+   * Filters applied (cheapest → most expensive):
+   *  1. SQL bounding-box on `homeLat`/`homeLng` so we don't haversine the
+   *     entire worker table.
+   *  2. `Preference.newJobAlerts` toggle (default true; respects user opt-out).
+   *  3. Audience rules: `team_first` while still in the flip window restricts
+   *     fan-out to the employer's `EmployerTeamMember` list.
+   *  4. Worker must have ≥1 registered device — checked by the push service.
+   *  5. Final haversine in TS — exact radius cut.
+   *
+   * Best-effort: errors are swallowed so a downed FCM never blocks the job
+   * post. Fired AFTER the create/publish transaction commits.
+   */
+  private async fanOutNewJobPush(job: {
+    id: string;
+    employerId: string;
+    title: string;
+    type: string;
+    payAmount: number;
+    durationHours: number;
+    address: string;
+    lat: number;
+    lng: number;
+    audience: string;
+    audienceFlippedAt: Date | null;
+  }): Promise<void> {
+    try {
+      // Largest preferredRadiusKm we care about in Lagos demo data. Bounding
+      // box covers a generous superset — TS haversine prunes it exactly.
+      const maxRadiusKm = 50;
+      const degLatPad = maxRadiusKm / 111;
+      const degLngPad =
+        maxRadiusKm /
+        (111 * Math.max(0.1, Math.cos((job.lat * Math.PI) / 180)));
+
+      const teamFiltered =
+        job.audience === 'team_first' && job.audienceFlippedAt === null;
+      const teamWorkerIds = teamFiltered
+        ? (
+            await this.prisma.employerTeamMember.findMany({
+              where: { employerId: job.employerId },
+              select: { workerId: true },
+            })
+          ).map((t) => t.workerId)
+        : null;
+
+      const workers = await this.prisma.worker.findMany({
+        where: {
+          deletionScheduledAt: null,
+          homeLat: {
+            not: null,
+            gte: job.lat - degLatPad,
+            lte: job.lat + degLatPad,
+          },
+          homeLng: {
+            not: null,
+            gte: job.lng - degLngPad,
+            lte: job.lng + degLngPad,
+          },
+          // `Preference.newJobAlerts` defaults to `true`. Workers with no
+          // Preference row (haven't visited the settings screen) are still
+          // opted in — we exclude only explicit opt-outs.
+          NOT: { preferences: { is: { newJobAlerts: false } } },
+          devices: { some: { NOT: { pushToken: '' } } },
+          ...(teamWorkerIds ? { id: { in: teamWorkerIds } } : {}),
+        },
+        select: {
+          id: true,
+          homeLat: true,
+          homeLng: true,
+          preferredRadiusKm: true,
+        },
+      });
+
+      let eligible = 0;
+      for (const w of workers) {
+        if (w.homeLat === null || w.homeLng === null) continue;
+        const distanceM = haversineMeters(
+          { lat: w.homeLat, lng: w.homeLng },
+          { lat: job.lat, lng: job.lng },
+        );
+        const radiusM = (w.preferredRadiusKm ?? 0) * 1000;
+        if (radiusM <= 0 || distanceM > radiusM) continue;
+        eligible += 1;
+        void this.push.notifyWorker(w.id, {
+          kind: 'new_job',
+          // Stable, dedup-friendly id: same job + same worker = same key on
+          // the device, so the OS notification tray collapses retries.
+          notificationId: `new_job_${job.id}_${w.id}`,
+          title: 'New job near you',
+          body: `${job.title} · ₦${job.payAmount.toLocaleString('en-NG')} · ${job.durationHours}h`,
+          deeplink: `forge://jobs/${job.id}`,
+          extraData: { jobId: job.id, jobType: job.type },
+        });
+      }
+
+      this.logger.log(
+        `[new_job] fan-out queued for job=${job.id} eligible=${eligible}/${workers.length} bbox`,
+      );
+    } catch (err) {
+      this.logger.error(
+        `[new_job] fan-out failed for job=${job.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private buildWhere(
