@@ -78,7 +78,14 @@ export class EmployerWorkSessionsService {
                 select: { id: true, name: true, photoUrl: true, primarySkill: true },
               },
               job: {
-                select: { id: true, title: true, address: true, lat: true, lng: true },
+                select: {
+                  id: true,
+                  title: true,
+                  address: true,
+                  neighborhood: true,
+                  lat: true,
+                  lng: true,
+                },
               },
             },
           },
@@ -163,6 +170,7 @@ export class EmployerWorkSessionsService {
           id: s.application.job.id,
           title: s.application.job.title,
           address: s.application.job.address,
+          neighborhood: s.application.job.neighborhood,
         },
       };
     });
@@ -226,6 +234,7 @@ export class EmployerWorkSessionsService {
         id: session.application.job.id,
         title: session.application.job.title,
         address: session.application.job.address,
+        neighborhood: session.application.job.neighborhood,
       },
     };
   }

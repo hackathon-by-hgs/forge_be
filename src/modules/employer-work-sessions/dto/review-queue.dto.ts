@@ -41,6 +41,9 @@ export class ReviewQueueJobDto {
 
   @ApiProperty({ example: '14 Bourdillon Rd, Ikoyi' })
   address!: string;
+
+  @ApiProperty({ nullable: true, example: 'Ikoyi' })
+  neighborhood!: string | null;
 }
 
 export class ReviewQueueItemDto {
