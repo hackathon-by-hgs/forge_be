@@ -50,4 +50,5 @@ export const ID_PREFIXES = {
   teamMember: 'tmem',
   block: 'blk',
   dispute: 'dis',
+  rating: 'rat',
 } as const;

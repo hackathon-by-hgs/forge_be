@@ -31,6 +31,7 @@ import {
 } from '../../common/decorators/idempotency-key.decorator';
 import { IdempotencyService } from '../../common/interceptors/idempotency.service';
 import { ErrorResponseDto } from '../../common/dto/error-response.dto';
+import { AppError } from '../../common/utils/app-error';
 import { EMPLOYER_ROLES } from '../../common/enums/role.enum';
 import { EmployerWorkSessionsService } from './employer-work-sessions.service';
 import {
@@ -43,6 +44,12 @@ import {
   ReviewQueueQueryDto,
   ReviewQueueResponseDto,
 } from './dto/review-queue.dto';
+import { RatingsService } from '../ratings/ratings.service';
+import {
+  CreateRatingDto,
+  RatingAuthorRole,
+  RatingEnvelopeDto,
+} from '../ratings/dto/rating.dto';
 
 @ApiTags('Employer')
 @ApiBearerAuth('bearer-user')
@@ -53,6 +60,7 @@ export class EmployerWorkSessionsController {
   constructor(
     private readonly sessions: EmployerWorkSessionsService,
     private readonly idem: IdempotencyService,
+    private readonly ratings: RatingsService,
   ) {}
 
   @Get()
@@ -222,6 +230,69 @@ export class EmployerWorkSessionsController {
           body,
           req,
         ),
+      }),
+    );
+    return result.body;
+  }
+
+  @Post(':id/rating')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiIdempotencyKey()
+  @ApiOperation({
+    summary: 'Employer → worker rating. Mutual + blind for 48h.',
+    description: [
+      '**Audience:** Employer dashboard — `/work-sessions/:id` review screen + the inline rating ',
+      'modal opened by the `PENDING_RATINGS_BLOCK_POSTING` 422 on `POST /v1/employer/jobs`.',
+      '',
+      '**Behavior:** Only valid for sessions in a terminal `verification_state` (`employer_confirmed`, ',
+      '`auto_released`, `disputed` — disputed sessions can still be rated; the rating just sits ',
+      "against a frozen payout). One rating per employer per session — repeat returns ",
+      '`409 ALREADY_RATED`. Tags validated against the `employer → worker` vocabulary (§27 §3). ',
+      'The rating is invisible to the worker until either the worker also rates the employer OR ',
+      '48 hours have passed.',
+      '',
+      '**Idempotency:** required. Recommended stable key `rating:{session_id}:{employer_id}`.',
+    ].join('\n\n'),
+  })
+  @ApiBody({ type: CreateRatingDto })
+  @ApiResponse({ status: 201, type: RatingEnvelopeDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'VALIDATION_FAILED — bad stars / >3 tags' })
+  @ApiResponse({ status: 403, type: ErrorResponseDto, description: 'NO_EMPLOYER_SCOPE' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto, description: 'SESSION_NOT_FOUND' })
+  @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'ALREADY_RATED' })
+  @ApiResponse({ status: 422, type: ErrorResponseDto, description: 'INVALID_STATE | UNKNOWN_TAG' })
+  async rateWorker(
+    @CurrentUser() me: AuthedUser,
+    @Param('id') id: string,
+    @Body() body: CreateRatingDto,
+    @IdempotencyKey(true) key: string,
+  ): Promise<RatingEnvelopeDto> {
+    if (!me.employerId) {
+      throw new AppError(
+        403,
+        'NO_EMPLOYER_SCOPE',
+        'This account is not bound to a business.',
+      );
+    }
+    const employerId = me.employerId;
+    const result = await this.idem.runForUser(
+      {
+        userId: me.userId,
+        key,
+        method: 'POST',
+        path: `/employer/work-sessions/${id}/rating`,
+        bodyForHash: body,
+      },
+      async () => ({
+        status: 201,
+        body: {
+          rating: await this.ratings.createRating({
+            sessionId: id,
+            authorRole: RatingAuthorRole.Employer,
+            authorId: employerId,
+            body,
+          }),
+        },
       }),
     );
     return result.body;

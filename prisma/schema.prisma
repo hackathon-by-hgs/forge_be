@@ -33,6 +33,12 @@ model Worker {
   jobsCompleted            Int      @default(0) @map("jobs_completed")
   reliabilityScore         Int      @default(100) @map("reliability_score")
   averageRating            Float    @default(0) @map("average_rating")
+  // §27 — denormalised aggregates over the `Rating` table where
+  // `subject_id = worker.id`. Updated in the same tx as the rating insert.
+  // `tagsTop` is the top-3 most-frequent tags across the last 30 days of
+  // ratings; recomputed on every rating insert.
+  ratingsCount             Int      @default(0) @map("ratings_count")
+  tagsTop                  String[] @default([]) @map("tags_top")
   creditScore              Int      @default(50) @map("credit_score")
   joinedAt                 DateTime @default(now()) @map("joined_at")
 
@@ -196,7 +202,12 @@ model Employer {
   // Worker-mobile-facing fields. The mobile feed embeds an employer summary on each
   // job; these power that view. Updated by the employer dashboard's settings endpoints.
   photoUrl                 String?  @map("photo_url")
+  // §27 — `rating` is the average across all worker→employer ratings (alias
+  // for `averageRating` on Worker). `ratingsCount` + `tagsTop` mirror the
+  // Worker aggregates for the same purpose.
   rating                   Float    @default(0)
+  ratingsCount             Int      @default(0) @map("ratings_count")
+  tagsTop                  String[] @default([]) @map("tags_top")
   phoneNumber              String?  @map("phone_number")
 
   // Worker-mobile employer profile (lib/features/employers/.../employer_detail_screen.dart).
@@ -400,6 +411,7 @@ model WorkSession {
 
   application JobApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   disputes    Dispute[]
+  ratings     Rating[]
 
   @@index([verificationState, holdReleaseAt])
   @@map("work_sessions")
@@ -426,6 +438,31 @@ model Dispute {
   @@index([status])
   @@index([workSessionId])
   @@map("disputes")
+}
+
+/// §27 — mutual blind 5-star rating between worker and employer after a
+/// terminal session. One row per (work_session_id, author_role) — enforced
+/// by a unique index. `visibleAt` defaults to `submittedAt + 48h` at insert;
+/// the rating-create service flips both rows to NOW once the counterpart
+/// lands. Aggregates (`averageRating`, `ratingsCount`, `tagsTop`) are
+/// denormalised onto Worker / Employer rows in the same transaction.
+model Rating {
+  id            String   @id
+  workSessionId String   @map("work_session_id")
+  authorId      String   @map("author_id")
+  authorRole    String   @map("author_role") // 'worker' | 'employer'
+  subjectId     String   @map("subject_id")
+  stars         Int
+  tags          String[] @default([])
+  comment       String?
+  submittedAt   DateTime @default(now()) @map("submitted_at")
+  visibleAt     DateTime? @map("visible_at")
+
+  workSession WorkSession @relation(fields: [workSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([workSessionId, authorRole], map: "ratings_one_per_author_per_session_idx")
+  @@index([subjectId, submittedAt(sort: Desc)], map: "ratings_subject_idx")
+  @@map("ratings")
 }
 
 model ClockEvent {

@@ -31,6 +31,9 @@ export type PushKind =
   | 'loan_repayment_made'
   | 'loan_repayment_due'
   | 'worker_late'
+  /** §27 — reminder for the employer to rate a completed worker. Dashboard
+   *  bell only for now (employer-side FCM doesn't exist BE-side). */
+  | 'rate_your_worker'
   | 'auth_otp'
   | 'system';
 
@@ -57,6 +60,7 @@ const KIND_CHANNEL: Record<PushKind, string> = {
   loan_repayment_made: FORGE_PAYMENTS_CHANNEL,
   loan_rejected: FORGE_DEFAULT_CHANNEL,
   loan_repayment_due: FORGE_DEFAULT_CHANNEL,
+  rate_your_worker: FORGE_DEFAULT_CHANNEL,
   auth_otp: FORGE_DEFAULT_CHANNEL,
   system: FORGE_DEFAULT_CHANNEL,
 };

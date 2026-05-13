@@ -52,6 +52,17 @@ export class WorkerDto {
   @ApiProperty({ example: 4.7, description: '0.0-5.0' })
   average_rating!: number;
 
+  @ApiProperty({ example: 23, description: '§27 — count of ratings received (all-time).' })
+  ratings_count!: number;
+
+  @ApiProperty({
+    type: [String],
+    example: ['punctual', 'skilled', 'hard_working'],
+    description:
+      '§27 — top-3 most-frequent tags across the last 30 days of ratings received. Display-only.',
+  })
+  tags_top!: string[];
+
   @ApiProperty({ example: 76, description: '0-100' })
   credit_score!: number;
 

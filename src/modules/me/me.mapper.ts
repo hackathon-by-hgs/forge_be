@@ -15,6 +15,8 @@ export function toWorkerDto(w: Worker): WorkerDto {
     jobs_completed: w.jobsCompleted,
     reliability_score: w.reliabilityScore,
     average_rating: w.averageRating,
+    ratings_count: w.ratingsCount,
+    tags_top: w.tagsTop,
     credit_score: w.creditScore,
     joined_at: w.joinedAt.toISOString(),
     virtual_account:

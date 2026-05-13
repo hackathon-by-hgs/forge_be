@@ -31,6 +31,12 @@ import {
   ClockOutDto,
   WorkSessionResponseDto,
 } from './dto/session.dto';
+import { RatingsService } from '../ratings/ratings.service';
+import {
+  CreateRatingDto,
+  RatingAuthorRole,
+  RatingEnvelopeDto,
+} from '../ratings/dto/rating.dto';
 
 @ApiTags('Work Sessions')
 @ApiBearerAuth('bearer')
@@ -40,6 +46,7 @@ export class SessionsController {
   constructor(
     private readonly sessions: SessionsService,
     private readonly idem: IdempotencyService,
+    private readonly ratings: RatingsService,
   ) {}
 
   @Post()
@@ -131,5 +138,58 @@ export class SessionsController {
       async () => ({ status: 202, body: await this.sessions.clockOut(me.workerId, id, body) }),
     );
     return r.body;
+  }
+
+  @Post(':id/rating')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiIdempotencyKey()
+  @ApiOperation({
+    summary: 'Worker → employer rating. Mutual + blind for 48h.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** `RateEmployerScreen` (1-tap 5-star + tag chips) on `/jobs/:id/rate-employer` ',
+      'and `/profile/pending-ratings/:id`.',
+      '',
+      '**Behavior:** Only valid for sessions in a terminal `verification_state` (`employer_confirmed`, ',
+      '`auto_released`, `disputed`). One rating per worker per session — repeat returns `409 ALREADY_RATED`. ',
+      'Tags are validated against the `worker → employer` vocabulary (see §27 §3). The rating is invisible ',
+      "to the employer until either the employer also rates the worker OR 48 hours have passed (`visible_to_subject` ",
+      'flips to true at that point).',
+      '',
+      '**Idempotency:** required. Recommended stable key `rating:{session_id}:{worker_id}`.',
+    ].join('\n\n'),
+  })
+  @ApiResponse({ status: 201, type: RatingEnvelopeDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'VALIDATION_FAILED — bad stars / >3 tags' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto, description: 'SESSION_NOT_FOUND' })
+  @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'ALREADY_RATED' })
+  @ApiResponse({ status: 422, type: ErrorResponseDto, description: 'INVALID_STATE | UNKNOWN_TAG' })
+  async rateEmployer(
+    @CurrentWorker() me: AuthedWorker,
+    @Param('id') id: string,
+    @Body() body: CreateRatingDto,
+    @IdempotencyKey(true) key: string,
+  ): Promise<RatingEnvelopeDto> {
+    const result = await this.idem.run(
+      {
+        workerId: me.workerId,
+        key,
+        method: 'POST',
+        path: `/sessions/${id}/rating`,
+        bodyForHash: body,
+      },
+      async () => ({
+        status: 201,
+        body: {
+          rating: await this.ratings.createRating({
+            sessionId: id,
+            authorRole: RatingAuthorRole.Worker,
+            authorId: me.workerId,
+            body,
+          }),
+        },
+      }),
+    );
+    return result.body;
   }
 }

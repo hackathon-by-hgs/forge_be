@@ -308,6 +308,38 @@ export class EmployerJobsService {
     req: Request,
   ): Promise<JobDto> {
     const eid = this.requireScope(actor.employerId);
+
+    // §27 §4 — "can't post until you rate" soft block. Returns 422 with the
+    // unrated session ids so the dashboard can render an inline rating
+    // modal. Sessions completed in the last 24h are exempt — high-volume
+    // employers must be able to post tomorrow's job before yesterday's
+    // rating debt clears. Cap the result so a huge backlog doesn't bloat
+    // the error envelope.
+    const ratingGateCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const pendingRatings = await this.prisma.workSession.findMany({
+      where: {
+        verificationState: { in: ['employer_confirmed', 'auto_released'] },
+        application: {
+          job: { employerId: eid },
+          completedAt: { lt: ratingGateCutoff },
+        },
+        NOT: { ratings: { some: { authorRole: 'employer' } } },
+      },
+      select: { id: true },
+      take: 25,
+    });
+    if (pendingRatings.length > 0) {
+      throw new AppError(
+        422,
+        'PENDING_RATINGS_BLOCK_POSTING',
+        `Rate your last ${pendingRatings.length} worker(s) before posting a new job.`,
+        {
+          pending_count: pendingRatings.length,
+          pending_session_ids: pendingRatings.map((p) => p.id),
+        },
+      );
+    }
+
     const dbType = mapDashboardTypeToDbValues(body.type)[0]; // pick canonical DB value for write
     const id = newId(ID_PREFIXES.job);
     const status = body.postNow ? 'open' : 'draft';
