@@ -275,10 +275,22 @@ export class BankLoansService {
       request: req,
     });
 
+    // Legacy event — kept for Phase 4 clients already wired against it.
     this.stream.publish({
       scope: { kind: 'bank', id: bid },
       event: 'loan.disbursed',
       data: { loanId, principalNaira, borrowerType: loan.borrowerType },
+    });
+    // §27 spec name — bank-web invalidation map keys on `loan.lifecycle_changed`.
+    this.stream.publish({
+      scope: { kind: 'bank', id: bid },
+      event: 'loan.lifecycle_changed',
+      data: {
+        loanId,
+        status: 'active',
+        riskLevel: 'green',
+        borrowerId: loan.workerId ?? loan.employerId,
+      },
     });
 
     if (workerNotificationId) {
@@ -396,6 +408,7 @@ export class BankLoansService {
       request: req,
     });
 
+    // Legacy event — kept for Phase 4 clients already wired against it.
     this.stream.publish({
       scope: { kind: 'bank', id: bid },
       event: 'loan.repayment_paid',
@@ -407,6 +420,31 @@ export class BankLoansService {
         allPaid,
       },
     });
+    // §27 spec name — bank-web invalidation map keys on `loan_repayment.updated`.
+    this.stream.publish({
+      scope: { kind: 'bank', id: bid },
+      event: 'loan_repayment.updated',
+      data: {
+        repaymentId,
+        loanId: repayment.loanId,
+        status: 'paid',
+        amountNaira: amount,
+        paidAt: now.toISOString(),
+      },
+    });
+    if (allPaid) {
+      // `repaid` is a terminal lifecycle transition — surface it too.
+      this.stream.publish({
+        scope: { kind: 'bank', id: bid },
+        event: 'loan.lifecycle_changed',
+        data: {
+          loanId: repayment.loanId,
+          status: 'repaid',
+          riskLevel: 'green',
+          borrowerId: repayment.loan.workerId ?? repayment.loan.employerId,
+        },
+      });
+    }
 
     if (updated.workerNotificationId) {
       void this.push.sendForNotificationRow(updated.workerNotificationId);

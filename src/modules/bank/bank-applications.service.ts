@@ -164,10 +164,23 @@ export class BankApplicationsService {
       request: req,
     });
 
+    // Legacy event — kept for Phase 4 clients already wired against it.
     this.stream.publish({
       scope: { kind: 'bank', id: bid },
       event: 'application.decided',
       data: { applicationId: id, decision: 'approved', loanId, principalNaira },
+    });
+    // §27 spec name — bank-web invalidation map keys on
+    // `loan_application.lifecycle_changed`.
+    this.stream.publish({
+      scope: { kind: 'bank', id: bid },
+      event: 'loan_application.lifecycle_changed',
+      data: {
+        applicationId: id,
+        status: 'approved',
+        decidedAt: new Date().toISOString(),
+        loanId,
+      },
     });
 
     return toLoanDto(
@@ -214,10 +227,23 @@ export class BankApplicationsService {
       request: req,
     });
 
+    // Legacy event — kept for Phase 4 clients already wired against it.
     this.stream.publish({
       scope: { kind: 'bank', id: bid },
       event: 'application.decided',
       data: { applicationId: id, decision: 'rejected', reason: body.reason },
+    });
+    // §27 spec name — bank-web invalidation map keys on
+    // `loan_application.lifecycle_changed`.
+    this.stream.publish({
+      scope: { kind: 'bank', id: bid },
+      event: 'loan_application.lifecycle_changed',
+      data: {
+        applicationId: id,
+        status: 'rejected',
+        decidedAt: new Date().toISOString(),
+        reason: body.reason,
+      },
     });
 
     return toLoanApplicationDto(

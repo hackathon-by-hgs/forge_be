@@ -132,6 +132,7 @@ export class BankRiskFlaggingCron {
             daysOverdue,
             now,
           );
+          // Legacy event — kept for Phase 4 clients already wired against it.
           this.stream.publish({
             scope: { kind: 'bank', id: loan.bankId! },
             event: 'loan.risk_changed',
@@ -140,6 +141,18 @@ export class BankRiskFlaggingCron {
               status: derived.status,
               riskLevel: derived.riskLevel,
               daysOverdue,
+            },
+          });
+          // §27 spec name — bank-web invalidation map keys on
+          // `loan.lifecycle_changed` for any status / riskLevel transition.
+          this.stream.publish({
+            scope: { kind: 'bank', id: loan.bankId! },
+            event: 'loan.lifecycle_changed',
+            data: {
+              loanId: loan.id,
+              status: derived.status,
+              riskLevel: derived.riskLevel,
+              borrowerId: loan.workerId ?? loan.employerId,
             },
           });
         }
@@ -154,6 +167,26 @@ export class BankRiskFlaggingCron {
 
     if (changed > 0) {
       this.logger.log(`[risk-flagging] updated ${changed} loan(s)`);
+    }
+
+    // §27 — `risk-radar.refreshed` + `analytics.refreshed` once per run
+    // regardless of whether anything changed. Bank-web invalidates
+    // ['bank','risk-radar'] / ['bank','analytics'] off these. Until the
+    // dedicated nightly analytics-snapshot cron lands, analytics endpoints
+    // compute live — but the FE invalidation contract stays stable.
+    const affected = new Set(loans.map((l) => l.bankId).filter((b): b is string => !!b));
+    const asOf = now.toISOString();
+    for (const bankId of affected) {
+      this.stream.publish({
+        scope: { kind: 'bank', id: bankId },
+        event: 'risk-radar.refreshed',
+        data: { asOf },
+      });
+      this.stream.publish({
+        scope: { kind: 'bank', id: bankId },
+        event: 'analytics.refreshed',
+        data: { asOf },
+      });
     }
   }
 

@@ -36,6 +36,7 @@ import { BankRiskRadarService } from './bank-risk-radar.service';
 import { BankLoansService } from './bank-loans.service';
 import { BankApplicationsService } from './bank-applications.service';
 import { BankBorrowersService } from './bank-borrowers.service';
+import { BankAnalyticsService } from './bank-analytics.service';
 import { RiskRadarResponseDto } from './dto/risk-radar.dto';
 import {
   ApproveLoanApplicationDto,
@@ -55,6 +56,14 @@ import {
   LoanApplicationDto,
 } from './dto/loan-applications.dto';
 import { BorrowerProfileDto } from './dto/borrower.dto';
+import {
+  AnalyticsWindowQueryDto,
+  AttributionResponseDto,
+  CohortResponseDto,
+  PeriodKpiResponseDto,
+  VintageCurvesQueryDto,
+  VintageCurvesResponseDto,
+} from './dto/analytics.dto';
 
 @ApiTags('Bank')
 @ApiBearerAuth('bearer-user')
@@ -67,6 +76,7 @@ export class BankController {
     private readonly loans: BankLoansService,
     private readonly applications: BankApplicationsService,
     private readonly borrowers: BankBorrowersService,
+    private readonly analytics: BankAnalyticsService,
     private readonly idem: IdempotencyService,
   ) {}
 
@@ -355,5 +365,101 @@ export class BankController {
     @Param('id') id: string,
   ): Promise<BorrowerProfileDto> {
     return this.borrowers.profile(me.bankId, borrowerType, id);
+  }
+
+  // ── Performance Attribution analytics (§B1–B4) ───────────────────────────
+
+  @Get('analytics/period')
+  @ApiOperation({
+    summary: 'Period KPIs for the bank loan book — current vs. immediately-prior window.',
+    description: [
+      '**Audience:** Bank-web — `/performance` top KPI strip.',
+      '',
+      'Returns `current` + `priorMetrics` over rolling windows of equal length, plus the deltas in basis points. ',
+      '"In window" = `disbursedAt ∈ [from, to)` AND status NOT in (draft, pending_review, rejected). ',
+      '',
+      '`netYield` formula (must match the FE attribution-decomposition formula so the page renders identically ',
+      'on mock and live):',
+      '```',
+      'principal     = Σ principalNaira',
+      'weightedApr   = Σ (apr × principalNaira) / max(1, principal)',
+      'writeOffDrag  = Σ outstandingNaira(defaulted/written_off) / max(1, principal)',
+      'netYield      = max(0, weightedApr × repaymentRate − writeOffDrag)',
+      '```',
+    ].join('\n'),
+  })
+  @ApiResponse({ status: 200, type: PeriodKpiResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'VALIDATION_FAILED — bad window or as_of' })
+  @ApiResponse({ status: 403, type: ErrorResponseDto, description: 'NO_BANK_SCOPE' })
+  analyticsPeriod(
+    @CurrentUser() me: AuthedUser,
+    @Query() q: AnalyticsWindowQueryDto,
+  ): Promise<PeriodKpiResponseDto> {
+    return this.analytics.period(me.bankId, q);
+  }
+
+  @Get('analytics/attribution')
+  @ApiOperation({
+    summary: 'Five-factor decomposition of the period repayment-rate delta.',
+    description: [
+      '**Audience:** Bank-web — `/performance` attribution waterfall.',
+      '',
+      'Returns exactly 5 factors when both windows have ≥1 loan, in this order: ',
+      '`borrower_mix → approval_gate → tenure → borrower_type_mix → residual`. The bps values are signed and ',
+      'sum to `totalDeltaBps` (which equals `deltaBps.repaymentRate` from `/analytics/period` for the same window). ',
+      'Empty `factors[]` when either window has count=0 — FE renders an empty state.',
+      '',
+      'Coefficient weights (8 / 6 / 4 / 18) are placeholders; tune via regression once ≥ 6 months of real loan ',
+      'history exists. Until then we hold them constant so the FE chart stays stable across the mock→live cutover.',
+    ].join('\n'),
+  })
+  @ApiResponse({ status: 200, type: AttributionResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'VALIDATION_FAILED' })
+  @ApiResponse({ status: 403, type: ErrorResponseDto, description: 'NO_BANK_SCOPE' })
+  analyticsAttribution(
+    @CurrentUser() me: AuthedUser,
+    @Query() q: AnalyticsWindowQueryDto,
+  ): Promise<AttributionResponseDto> {
+    return this.analytics.attribution(me.bankId, q);
+  }
+
+  @Get('analytics/cohorts')
+  @ApiOperation({
+    summary: 'Cohort tables — score band, borrower type, status breakdown.',
+    description: [
+      '**Audience:** Bank-web — `/performance` cohort tables.',
+      '',
+      '`byScoreBand` always returns 4 entries (90–100, 80–89, 70–79, 60–69) even on empty windows so the FE chart ',
+      'axes stay stable. `byBorrowerType` always returns 2 entries. `statusBreakdown` omits zero-count statuses.',
+    ].join('\n'),
+  })
+  @ApiResponse({ status: 200, type: CohortResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto, description: 'NO_BANK_SCOPE' })
+  analyticsCohorts(
+    @CurrentUser() me: AuthedUser,
+    @Query() q: AnalyticsWindowQueryDto,
+  ): Promise<CohortResponseDto> {
+    return this.analytics.cohorts(me.bankId, q);
+  }
+
+  @Get('analytics/vintage-curves')
+  @ApiOperation({
+    summary: 'Cumulative loss curves per disbursement cohort.',
+    description: [
+      '**Audience:** Bank-web — `/performance` vintage line chart.',
+      '',
+      'Cumulative loss at `monthsSince=m` for cohort c = Σ outstandingNaira(defaulted/written_off) ',
+      'over loans in c whose age ≥ m, divided by cohort principal. ',
+      'Cohorts with zero disbursements are omitted from `cohorts[]` and from each row so the FE chart hides their line.',
+    ].join('\n'),
+  })
+  @ApiResponse({ status: 200, type: VintageCurvesResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'VALIDATION_FAILED' })
+  @ApiResponse({ status: 403, type: ErrorResponseDto, description: 'NO_BANK_SCOPE' })
+  analyticsVintageCurves(
+    @CurrentUser() me: AuthedUser,
+    @Query() q: VintageCurvesQueryDto,
+  ): Promise<VintageCurvesResponseDto> {
+    return this.analytics.vintageCurves(me.bankId, q);
   }
 }

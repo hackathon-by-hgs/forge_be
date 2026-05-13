@@ -30,10 +30,25 @@ export type StreamScope =
  *       → broadcast every 25s so proxies don't close idle connections.
  */
 export type StreamEventName =
+  // ── Bank — Phase 4 legacy names (still emitted for backward compat)
   | 'loan.disbursed'
   | 'loan.repayment_paid'
   | 'loan.risk_changed'
   | 'application.decided'
+  // ── Bank — §27 spec names (emitted alongside the legacy ones above so
+  //    the bank-web dashboard's invalidation map keys onto stable names.
+  //    FE invalidation:
+  //      `loan.lifecycle_changed`           → ['bank','loans'] + detail + risk-radar
+  //      `loan_application.lifecycle_changed` → ['bank','applications'] + detail
+  //      `loan_repayment.updated`           → ['bank','loans','detail',loanId] + risk-radar
+  //      `risk-radar.refreshed`             → ['bank','risk-radar']
+  //      `analytics.refreshed`              → ['bank','analytics']
+  | 'loan.lifecycle_changed'
+  | 'loan_application.lifecycle_changed'
+  | 'loan_repayment.updated'
+  | 'risk-radar.refreshed'
+  | 'analytics.refreshed'
+  // ── Employer + worker — §11.7 / §07b shipped earlier
   | 'job.lifecycle_changed'
   | 'worker.clock_event'
   | 'transaction.updated'

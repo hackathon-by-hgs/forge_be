@@ -4,6 +4,7 @@ import { BankRiskRadarService } from './bank-risk-radar.service';
 import { BankLoansService } from './bank-loans.service';
 import { BankApplicationsService } from './bank-applications.service';
 import { BankBorrowersService } from './bank-borrowers.service';
+import { BankAnalyticsService } from './bank-analytics.service';
 import { BankRiskFlaggingCron } from './bank-risk-flagging.cron';
 
 @Module({
@@ -13,6 +14,7 @@ import { BankRiskFlaggingCron } from './bank-risk-flagging.cron';
     BankLoansService,
     BankApplicationsService,
     BankBorrowersService,
+    BankAnalyticsService,
     BankRiskFlaggingCron,
   ],
 })
