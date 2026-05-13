@@ -194,7 +194,11 @@ export class EmployerWorkSessionsController {
     type: ErrorResponseDto,
     description: 'INVALID_STATE — session already released or already disputed.',
   })
-  @ApiResponse({ status: 422, type: ErrorResponseDto, description: 'REASON_REQUIRED' })
+  @ApiResponse({
+    status: 400,
+    type: ErrorResponseDto,
+    description: 'VALIDATION_FAILED — missing/invalid `reason`, oversized description, etc.',
+  })
   async dispute(
     @CurrentUser() me: AuthedUser,
     @Param('id') id: string,
