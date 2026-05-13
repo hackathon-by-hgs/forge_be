@@ -124,6 +124,38 @@ export class EmployerJobsController {
     return this.jobs.recentTemplates(me.employerId);
   }
 
+  // ── CSV export ───────────────────────────────────────────────────────────
+  // NOTE: must be declared BEFORE the `:id` route below — Nest/Express match
+  // by declaration order, and `:id` will otherwise swallow `export.csv` as a
+  // literal id and 404 in the detail handler.
+  @Get('export.csv')
+  @ApiProduces('text/csv')
+  @ApiOperation({
+    summary: 'Streamed CSV of jobs matching the same filters as `GET /employer/jobs`.',
+    description: [
+      '**Audience:** Employer-web.',
+      '**Powers:** "Export jobs (CSV)" action on `/jobs` and `/jobs/active`. Streamed response — content does not buffer ',
+      'in memory regardless of result size.',
+      '',
+      '**Format:** `text/csv; charset=utf-8` with a UTF-8 BOM so Excel renders ₦ + Yoruba/Igbo names correctly ',
+      '(BACKEND_BRIEF §11.9). RFC 4180 quoting. Filters/sort match `GET /employer/jobs`.',
+    ].join('\n\n'),
+  })
+  @ApiResponse({ status: 200, description: 'CSV stream.' })
+  async exportCsv(
+    @CurrentUser() me: AuthedUser,
+    @Query() q: JobsListQueryDto,
+    @Res() res: Response,
+  ): Promise<void> {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="jobs-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.setHeader('Cache-Control', 'no-store');
+    for await (const chunk of this.jobs.exportCsvRows(me.employerId, q)) {
+      res.write(chunk);
+    }
+    res.end();
+  }
+
   // ── Detail ───────────────────────────────────────────────────────────────
   @Get(':id')
   @ApiOperation({
@@ -210,35 +242,6 @@ export class EmployerJobsController {
     @Param('id') id: string,
   ): Promise<JobProofResponseDto> {
     return this.jobs.proof(me.employerId, id);
-  }
-
-  // ── CSV export ───────────────────────────────────────────────────────────
-  @Get('export.csv')
-  @ApiProduces('text/csv')
-  @ApiOperation({
-    summary: 'Streamed CSV of jobs matching the same filters as `GET /employer/jobs`.',
-    description: [
-      '**Audience:** Employer-web.',
-      '**Powers:** "Export jobs (CSV)" action on `/jobs` and `/jobs/active`. Streamed response — content does not buffer ',
-      'in memory regardless of result size.',
-      '',
-      '**Format:** `text/csv; charset=utf-8` with a UTF-8 BOM so Excel renders ₦ + Yoruba/Igbo names correctly ',
-      '(BACKEND_BRIEF §11.9). RFC 4180 quoting. Filters/sort match `GET /employer/jobs`.',
-    ].join('\n\n'),
-  })
-  @ApiResponse({ status: 200, description: 'CSV stream.' })
-  async exportCsv(
-    @CurrentUser() me: AuthedUser,
-    @Query() q: JobsListQueryDto,
-    @Res() res: Response,
-  ): Promise<void> {
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="jobs-${new Date().toISOString().slice(0, 10)}.csv"`);
-    res.setHeader('Cache-Control', 'no-store');
-    for await (const chunk of this.jobs.exportCsvRows(me.employerId, q)) {
-      res.write(chunk);
-    }
-    res.end();
   }
 
   // ── Create (idempotent) ──────────────────────────────────────────────────
