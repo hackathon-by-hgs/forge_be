@@ -647,7 +647,11 @@ export class EmployerJobsService {
           data: {
             id: pushNotificationId,
             workerId: before.assignedWorkerId,
-            kind: 'job_cancelled',
+            // Cancellation rides the in-app feed as an application_update —
+            // assigned worker's application is being torn down. pushKind
+            // preserves the granular variant for §24 channel routing.
+            kind: 'application_update',
+            pushKind: 'job_cancelled',
             title: 'Job cancelled',
             body: body.reason
               ? `Your scheduled job was cancelled: ${body.reason}`
@@ -704,6 +708,14 @@ export class EmployerJobsService {
         `Cannot accept an application in status '${target.status}'.`,
       );
     }
+
+    // Fetch the employer once so siblings get a properly attributed
+    // "<employer> went with someone else" rejection per spec §24.
+    const employer = await this.prisma.employer.findUnique({
+      where: { id: job.employerId },
+      select: { businessName: true },
+    });
+    const employerName = employer?.businessName ?? 'The employer';
 
     const now = new Date();
     const result = await this.prisma.$transaction(async (tx) => {
@@ -774,11 +786,15 @@ export class EmployerJobsService {
         data: {
           id: acceptedNotificationId,
           workerId: target.workerId,
-          kind: 'application_accepted',
-          title: 'Application accepted',
-          body: `Your application for "${job.title}" was accepted.`,
+          // 19_notifications.md — coarse kind is `application_update`;
+          // pushKind keeps the granular variant for §24 channel routing.
+          kind: 'application_update',
+          pushKind: 'application_accepted',
+          title: 'Your application was accepted',
+          body: `${job.title} · ₦${job.payAmount.toLocaleString('en-NG')} · ${job.durationHours}h`,
           timestamp: now,
-          deeplink: `/jobs/${jobId}/status`,
+          // Spec deeplink for accepted: `forge://jobs/:id/clock-in`.
+          deeplink: `/jobs/${jobId}/clock-in`,
         },
       });
       const rejectedNotificationIds: string[] = [];
@@ -789,9 +805,10 @@ export class EmployerJobsService {
           data: {
             id: nid,
             workerId: sib.workerId,
-            kind: 'application_rejected',
-            title: 'Job filled',
-            body: `Another worker was selected for "${job.title}".`,
+            kind: 'application_update',
+            pushKind: 'application_rejected',
+            title: `${employerName} went with someone else`,
+            body: `${job.title}${job.address ? ` at ${job.address}` : ''} · keep applying`,
             timestamp: now,
             deeplink: `/jobs/${jobId}/status`,
           },
@@ -827,7 +844,7 @@ export class EmployerJobsService {
     appId: string,
     req: Request,
   ): Promise<JobApplicationItemDto> {
-    await this.requireOwnedJob(actor.employerId, jobId);
+    const job = await this.requireOwnedJob(actor.employerId, jobId);
     const target = await this.prisma.jobApplication.findFirst({
       where: { id: appId, jobId },
       include: { worker: true },
@@ -840,6 +857,11 @@ export class EmployerJobsService {
         `Cannot reject an application in status '${target.status}'.`,
       );
     }
+    const employer = await this.prisma.employer.findUnique({
+      where: { id: job.employerId },
+      select: { businessName: true },
+    });
+    const employerName = employer?.businessName ?? 'The employer';
 
     const now = new Date();
     const updated = await this.prisma.$transaction(async (tx) => {
@@ -867,9 +889,12 @@ export class EmployerJobsService {
         data: {
           id: notificationId,
           workerId: target.workerId,
-          kind: 'application_rejected',
-          title: 'Application not accepted',
-          body: `Your application was not selected this time.`,
+          // 19_notifications.md — coarse kind; pushKind keeps the granular
+          // rejected variant for §24 default-channel routing.
+          kind: 'application_update',
+          pushKind: 'application_rejected',
+          title: `${employerName} went with someone else`,
+          body: `${job.title}${job.address ? ` at ${job.address}` : ''} · keep applying`,
           timestamp: now,
           deeplink: `/jobs/${jobId}/status`,
         },
@@ -1143,7 +1168,8 @@ export class EmployerJobsService {
         },
       });
 
-      let eligible = 0;
+      // Filter to workers actually within radius (exact haversine cut).
+      const within: Array<{ id: string; distanceKm: number }> = [];
       for (const w of workers) {
         if (w.homeLat === null || w.homeLng === null) continue;
         const distanceM = haversineMeters(
@@ -1152,21 +1178,66 @@ export class EmployerJobsService {
         );
         const radiusM = (w.preferredRadiusKm ?? 0) * 1000;
         if (radiusM <= 0 || distanceM > radiusM) continue;
-        eligible += 1;
-        void this.push.notifyWorker(w.id, {
+        within.push({ id: w.id, distanceKm: distanceM / 1000 });
+      }
+      if (within.length === 0) {
+        this.logger.log(
+          `[new_job] fan-out skipped for job=${job.id} — no workers within radius (bbox=${workers.length})`,
+        );
+        return;
+      }
+
+      // §24 rate limit — at most 5 `new_job` PUSHES per worker per hour.
+      // The in-app feed row is always written; only the device push is
+      // suppressed once the worker has been pinged 5× in the last hour.
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+      const recent = await this.prisma.notification.groupBy({
+        by: ['workerId'],
+        where: {
+          workerId: { in: within.map((w) => w.id) },
           kind: 'new_job',
-          // Stable, dedup-friendly id: same job + same worker = same key on
-          // the device, so the OS notification tray collapses retries.
-          notificationId: `new_job_${job.id}_${w.id}`,
-          title: 'New job near you',
-          body: `${job.title} · ₦${job.payAmount.toLocaleString('en-NG')} · ${job.durationHours}h`,
-          deeplink: `forge://jobs/${job.id}`,
-          extraData: { jobId: job.id, jobType: job.type },
+          timestamp: { gte: oneHourAgo },
+        },
+        _count: { workerId: true },
+      });
+      const recentByWorker = new Map(
+        recent.map((r) => [r.workerId, r._count.workerId]),
+      );
+
+      const now = new Date();
+      let pushed = 0;
+      let suppressed = 0;
+      for (const w of within) {
+        const distanceLabel =
+          w.distanceKm < 1
+            ? `${Math.max(1, Math.round(w.distanceKm * 1000))} m away`
+            : `${w.distanceKm < 10 ? w.distanceKm.toFixed(1) : Math.round(w.distanceKm)} km away`;
+        const notificationId = newId(ID_PREFIXES.notification);
+        // Always write the in-app feed row — even rate-limited workers
+        // see the job when they open the bell.
+        await this.prisma.notification.create({
+          data: {
+            id: notificationId,
+            workerId: w.id,
+            kind: 'new_job',
+            pushKind: 'new_job',
+            title: `New job nearby · ₦${job.payAmount.toLocaleString('en-NG')}`,
+            body: `${job.title} · ${distanceLabel}`,
+            timestamp: now,
+            deeplink: `/jobs/${job.id}`,
+          },
         });
+        const recentCount = recentByWorker.get(w.id) ?? 0;
+        if (recentCount >= 5) {
+          suppressed += 1;
+          continue;
+        }
+        pushed += 1;
+        void this.push.sendForNotificationRow(notificationId);
       }
 
       this.logger.log(
-        `[new_job] fan-out queued for job=${job.id} eligible=${eligible}/${workers.length} bbox`,
+        `[new_job] fan-out job=${job.id} bbox=${workers.length} within=${within.length} pushed=${pushed} rate_limited=${suppressed}`,
       );
     } catch (err) {
       this.logger.error(

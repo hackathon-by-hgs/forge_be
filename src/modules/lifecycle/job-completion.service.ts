@@ -361,28 +361,43 @@ export class JobCompletionService {
       ],
     });
 
-    // 6) Worker mobile notification — "₦{amount} arrived" / "payment pending".
-    //    The id is returned through `CompletionOutcome.notificationId` so the
-    //    caller can fire the FCM push after the transaction commits.
+    // 6) Worker mobile notification — "₦{amount} arrived in your wallet".
+    //    Coarse `kind: 'payment'` matches the 19_notifications.md feed
+    //    contract; `pushKind` carries the granular variant so the FCM
+    //    dispatcher picks the `opay_credit` sound on success. The id is
+    //    returned through `CompletionOutcome.notificationId` so the caller
+    //    can fire the FCM push after the transaction commits.
     const notificationId = newId(ID_PREFIXES.notification);
+    const durationHours = Math.max(
+      1,
+      Math.round(
+        ((session.clockOutAt ?? now).getTime() - session.clockInAt.getTime()) /
+          3_600_000,
+      ),
+    );
     await tx.notification.create({
       data: {
         id: notificationId,
         workerId: worker.id,
-        kind:
-          paymentStatus === 'succeeded'
-            ? 'payment_received'
-            : 'payment_pending',
+        kind: 'payment',
+        pushKind:
+          paymentStatus === 'succeeded' ? 'payment_received' : 'payment_pending',
         title:
           paymentStatus === 'succeeded'
-            ? 'Payment received'
+            ? `₦${amount.toLocaleString('en-NG')} arrived in your wallet`
             : 'Payment pending',
         body:
           paymentStatus === 'succeeded'
-            ? `₦${amount.toLocaleString('en-NG')} arrived in your wallet.`
+            ? `${job.title} · ${durationHours}h`
             : `₦${amount.toLocaleString('en-NG')} is pending — the business top-up is being processed.`,
         timestamp: now,
-        deeplink: '/wallet',
+        // Spec deeplink for `kind=payment` is `forge://transactions/:id`.
+        // The push dispatcher converts the in-app path `/transactions/<id>`
+        // → `forge://transactions/<id>`.
+        deeplink:
+          paymentStatus === 'succeeded'
+            ? `/transactions/${transactionId}`
+            : '/wallet',
       },
     });
 

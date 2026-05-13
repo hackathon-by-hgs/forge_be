@@ -7,6 +7,7 @@ import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { paginate } from '../../common/pagination/offset.dto';
 import { StreamPublisher } from '../stream/stream.publisher';
+import { PushNotificationService } from '../messaging/push-notification.service';
 import {
   ApproveLoanApplicationDto,
   LoanDto,
@@ -35,6 +36,7 @@ export class BankApplicationsService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly stream: StreamPublisher,
+    private readonly push: PushNotificationService,
   ) {}
 
   async list(
@@ -116,6 +118,12 @@ export class BankApplicationsService {
       app.worker?.reliabilityScore ?? app.employer?.creditScore ?? 50;
     const predicted = score >= 80 ? 0.97 : score >= 70 ? 0.9 : 0.75;
 
+    // §24 worker-mobile push — only for worker loans; business borrowers
+    // surface on the dashboard, not the mobile app.
+    const workerNotificationId = app.workerId
+      ? newId(ID_PREFIXES.notification)
+      : null;
+
     const created = await this.prisma.$transaction(async (tx) => {
       const loan = await tx.loan.create({
         data: {
@@ -142,6 +150,20 @@ export class BankApplicationsService {
         where: { id },
         data: { status: LoanApplicationStatus.Approved, decidedAt: now },
       });
+      if (workerNotificationId && app.workerId) {
+        await tx.notification.create({
+          data: {
+            id: workerNotificationId,
+            workerId: app.workerId,
+            kind: 'loan',
+            pushKind: 'loan_approved',
+            title: 'Your loan was approved',
+            body: `₦${principalNaira.toLocaleString('en-NG')} approved — disbursement coming next.`,
+            timestamp: now,
+            deeplink: '/loans/approved',
+          },
+        });
+      }
       return loan;
     });
 
@@ -183,6 +205,10 @@ export class BankApplicationsService {
       },
     });
 
+    if (workerNotificationId) {
+      void this.push.sendForNotificationRow(workerNotificationId);
+    }
+
     return toLoanDto(
       created,
       toBorrowerSummary(created.borrowerType, created.worker, created.employer),
@@ -211,10 +237,34 @@ export class BankApplicationsService {
     }
 
     const now = new Date();
-    const updated = await this.prisma.loanApplication.update({
-      where: { id },
-      data: { status: LoanApplicationStatus.Rejected, decidedAt: now },
-      include: { worker: true, employer: true },
+    // §24 — write the worker mobile notification in the same tx as the
+    // status flip so a retry doesn't double-notify.
+    const workerNotificationId = app.workerId
+      ? newId(ID_PREFIXES.notification)
+      : null;
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const u = await tx.loanApplication.update({
+        where: { id },
+        data: { status: LoanApplicationStatus.Rejected, decidedAt: now },
+        include: { worker: true, employer: true },
+      });
+      if (workerNotificationId && app.workerId) {
+        await tx.notification.create({
+          data: {
+            id: workerNotificationId,
+            workerId: app.workerId,
+            kind: 'loan',
+            pushKind: 'loan_rejected',
+            title: 'Loan application not approved',
+            body: body.reason
+              ? `Reason: ${body.reason}`
+              : 'Tap to see what to do next.',
+            timestamp: now,
+            deeplink: '/loans/rejected',
+          },
+        });
+      }
+      return u;
     });
 
     await this.audit.record({
@@ -245,6 +295,10 @@ export class BankApplicationsService {
         reason: body.reason,
       },
     });
+
+    if (workerNotificationId) {
+      void this.push.sendForNotificationRow(workerNotificationId);
+    }
 
     return toLoanApplicationDto(
       updated,

@@ -16,6 +16,9 @@ export interface FcmSendOutcome {
     | 'OK'
     | 'UNREGISTERED'
     | 'INVALID_ARGUMENT'
+    /** FCM project credentials don't match the token's sender id. Hard
+     *  config error — caller logs/pages ops, retry won't help. */
+    | 'SENDER_MISMATCH'
     | 'PROVIDER_ERROR'
     | 'PROVIDER_DISABLED'
     | null;
@@ -194,6 +197,21 @@ export class FcmClient {
         ok: false,
         messageId: null,
         code: 'INVALID_ARGUMENT',
+        message,
+      };
+    }
+    // §24 reliability — project credentials disagree with the token's
+    // sender id. Hard config error; caller logs + pages ops, retry won't
+    // help. FCM reports this as either status `SENDER_ID_MISMATCH` or a
+    // free-text "SenderId mismatch" message depending on the failure path.
+    if (
+      status === 'SENDER_ID_MISMATCH' ||
+      /sender[\s_]?id[\s_]?mismatch/i.test(message)
+    ) {
+      return {
+        ok: false,
+        messageId: null,
+        code: 'SENDER_MISMATCH',
         message,
       };
     }

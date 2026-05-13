@@ -1,9 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
-import { AuditService } from '../../common/audit/audit.service';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
-import { StreamPublisher } from '../stream/stream.publisher';
+import { WithdrawalSettlementService } from '../wallet/withdrawal-settlement.service';
 import { SquadClient } from './squad.client';
 import { classifySquadOutcome } from './squad-status';
 
@@ -38,8 +37,7 @@ export class SquadReconciliationCron {
   constructor(
     private readonly prisma: PrismaService,
     private readonly squad: SquadClient,
-    private readonly audit: AuditService,
-    private readonly stream: StreamPublisher,
+    private readonly settlement: WithdrawalSettlementService,
   ) {}
 
   @Cron(CronExpression.EVERY_5_MINUTES, { name: CRON_NAME })
@@ -97,41 +95,26 @@ export class SquadReconciliationCron {
             continue;
           }
 
-          await this.prisma.transaction.update({
-            where: { id: txn.id },
-            data: {
-              status: outcome.dbStatus,
-              settledAt: outcome.terminal ? new Date() : txn.settledAt,
-              failureReason: outcome.failureReason ?? null,
+          // Hand off to the settlement helper so cron-resolved outcomes
+          // converge to the same side effects as webhook-resolved ones:
+          // CAS-protected status flip, withdrawal refund on `failed`,
+          // worker push on terminal, audit + employer SSE.
+          const result = await this.settlement.applyTerminalOutcome({
+            transactionId: txn.id,
+            outcome,
+            source: 'cron',
+            squadVerifyMeta: {
+              status: verify.status,
+              eventName: verify.eventName || null,
             },
           });
 
-          await this.audit.record({
-            actor: { type: 'system' },
-            action: `squad.reconciled_${outcome.dbStatus}`,
-            entityType: 'transaction',
-            entityId: txn.id,
-            before: { status: txn.status },
-            after: {
-              status: outcome.dbStatus,
-              squadReference: txn.squadReference,
-              squadStatus: verify.status,
-              squadEvent: verify.eventName || null,
-              source: 'cron',
-            },
-          });
-
-          if (txn.employerId) {
-            this.stream.publish({
-              scope: { kind: 'employer', id: txn.employerId },
-              event: 'transaction.updated',
-              data: {
-                transactionId: txn.id,
-                status: outcome.dbStatus,
-                amountNaira: txn.amount,
-                source: 'cron',
-              },
-            });
+          if (!result.applied) {
+            // Webhook beat us to the row between candidate fetch and CAS.
+            // Count as resolved (someone terminalised it) so the metrics
+            // reflect that this row is no longer stuck.
+            resolved += 1;
+            continue;
           }
 
           if (outcome.terminal) resolved += 1;

@@ -540,6 +540,16 @@ export class SquadClient {
     return `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
   }
 
+  /**
+   * Public stub-mode flag so callers (e.g. `WithdrawalsService`) can apply
+   * the test-mode "auto-confirm the transfer locally because no webhook is
+   * coming" shortcut. Stays internal for routing decisions; do not gate
+   * business rules on this — it's purely a transport detail.
+   */
+  isStubMode(): boolean {
+    return this.isStub();
+  }
+
   // ── Internals ────────────────────────────────────────────────────────────
   private isStub(): boolean {
     return this.config.get<'real' | 'stub'>('squad.provider') === 'stub';

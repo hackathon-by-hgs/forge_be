@@ -379,7 +379,10 @@ export class EmployerWorkSessionsService {
         data: {
           id: workerNotificationId,
           workerId: session.application.workerId,
-          kind: 'payment_disputed',
+          // Coarse 'payment' kind per 19_notifications.md; pushKind keeps
+          // the granular dispute variant for the FCM payments channel.
+          kind: 'payment',
+          pushKind: 'payment_disputed',
           title: 'Your employer flagged this clock-out',
           body: "We'll resolve within 24h. Tap for details.",
           timestamp: reviewedAt,

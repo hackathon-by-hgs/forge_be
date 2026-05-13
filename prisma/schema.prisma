@@ -742,7 +742,13 @@ model DeviceToken {
 model Notification {
   id        String   @id
   workerId  String   @map("worker_id")
+  // Coarse kind exposed to the mobile in-app feed (19_notifications.md):
+  // `new_job | application_update | payment | loan | system`.
   kind      String
+  // Granular FCM channel kind (PushKind in push-notification.service.ts).
+  // Drives Android channel + custom sound selection. Nullable for legacy
+  // rows; when null, channel routing falls back to the coarse `kind`.
+  pushKind  String?  @map("push_kind")
   title     String
   body      String
   timestamp DateTime

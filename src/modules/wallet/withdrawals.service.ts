@@ -5,6 +5,7 @@ import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { SquadClient } from '../squad/squad.client';
 import { VirtualAccountProvisioner } from '../squad/virtual-account-provisioner.service';
+import { WithdrawalSettlementService } from './withdrawal-settlement.service';
 import { TransactionKind } from './dto/transaction.dto';
 import { WithdrawDto, WithdrawalPreviewQueryDto } from './dto/withdrawal.dto';
 
@@ -26,13 +27,16 @@ export class WithdrawalsService {
     private readonly config: ConfigService,
     private readonly squad: SquadClient,
     private readonly virtualAccount: VirtualAccountProvisioner,
+    private readonly settlement: WithdrawalSettlementService,
   ) {}
 
   /**
    * Resolve the withdrawal destination. If `bankAccountId` is provided, the
    * worker has chosen one of their linked external bank accounts. Otherwise
    * we default to the worker's own Squad virtual NUBAN — lazily provisioning
-   * it if signup hit a Squad outage.
+   * it if signup hit a Squad outage. When neither path yields a destination
+   * (no linked banks, no virtual NUBAN), surfaces `NO_BANK_LINKED` so the
+   * mobile can re-route to the link-bank flow.
    */
   private async resolveDestination(
     workerId: string,
@@ -79,10 +83,24 @@ export class WithdrawalsService {
       !worker?.squadVirtualAccountNumber ||
       !worker.squadVirtualAccountBankCode
     ) {
+      // No linked bank AND no virtual NUBAN — there's nowhere for the funds
+      // to land. The mobile routes to the link-bank screen on this code.
+      const linkedCount = await this.prisma.bankAccount.count({
+        where: { workerId },
+      });
+      if (linkedCount === 0) {
+        throw new AppError(
+          422,
+          'NO_BANK_LINKED',
+          'Link a bank account before withdrawing.',
+        );
+      }
+      // Has linked banks but didn't pick one and has no virtual NUBAN —
+      // ask them to pick (re-uses the same code; mobile re-prompts).
       throw new AppError(
-        503,
-        'PROVISIONING_VIRTUAL_ACCOUNT',
-        'Your virtual account is still being set up. Try again in a few seconds.',
+        422,
+        'NO_BANK_LINKED',
+        'Pick a linked bank for the withdrawal.',
       );
     }
     return {
@@ -116,8 +134,8 @@ export class WithdrawalsService {
     });
     if (!worker || q.amount > worker.walletBalance) {
       throw new AppError(
-        400,
-        'VALIDATION_FAILED',
+        422,
+        'INSUFFICIENT_BALANCE',
         'Amount exceeds wallet balance.',
       );
     }
@@ -150,9 +168,11 @@ export class WithdrawalsService {
     }
     const dest = await this.resolveDestination(workerId, body.bank_account_id);
     const squadReference = this.squad.newReference('wdr');
+    const last4 = dest.accountNumber.slice(-4);
 
-    // Phase 1 of the txn: debit wallet + write a `pending` Transaction so the
-    // mobile UI sees the withdrawal queued immediately.
+    // Phase 1 of the txn: debit wallet + write a `processing` Transaction so
+    // the mobile UI sees the withdrawal queued immediately. Re-checks
+    // wallet_balance inside the transaction to catch the preview→submit race.
     const result = await this.prisma.$transaction(async (tx) => {
       const worker = await tx.worker.findUnique({ where: { id: workerId } });
       if (!worker) throw new AppError(404, 'NOT_FOUND', 'Worker not found.');
@@ -175,8 +195,13 @@ export class WithdrawalsService {
           kind: 'withdrawal',
           amount: -body.amount,
           timestamp: new Date(),
-          title: `Withdrawal to ${dest.bankName} ****${dest.accountNumber.slice(-4)}`,
-          subtitle: 'Estimated arrival in 5 min',
+          // Title + subtitle aligned to the mobile receipt screen — the
+          // list item renders "Withdrawal to GTBank / ****6789 · Tunde
+          // Adeyemi". Subtitle does NOT carry the async-arrival string
+          // anymore; the mobile derives status from the txn row's
+          // `status` field via the detail endpoint.
+          title: `Withdrawal to ${dest.bankName}`,
+          subtitle: `****${last4} · ${dest.accountName}`,
           squadReference,
           relatedJobId: null,
           bankAccountId: dest.bankAccountId,
@@ -202,25 +227,47 @@ export class WithdrawalsService {
       this.logger.error(
         `[withdrawal] squad rejected ref=${squadReference} worker=${workerId}: ${outcome.message}`,
       );
-      await this.prisma.$transaction(async (tx) => {
-        await tx.transaction.update({
-          where: { id: result.transaction.id },
-          data: {
-            status: 'failed',
-            failureReason: outcome.message,
-            settledAt: new Date(),
-          },
-        });
-        await tx.worker.update({
-          where: { id: workerId },
-          data: { walletBalance: { increment: body.amount } },
-        });
+      // Route through the settlement helper so the failure path produces
+      // the same side effects as a webhook-reported `Transfer.failed`:
+      // CAS-protected status flip, wallet refund, audit, "withdrawal
+      // failed — refunded" push.
+      await this.settlement.applyTerminalOutcome({
+        transactionId: result.transaction.id,
+        outcome: {
+          kind: 'transfer',
+          dbStatus: 'failed',
+          terminal: true,
+          failureReason: outcome.message,
+        },
+        source: 'sync_reject',
       });
       throw new AppError(
         502,
         'PROVIDER_UNAVAILABLE',
         `Withdrawal provider rejected the transfer: ${outcome.message}`,
       );
+    }
+
+    // Test/stub mode: no Squad webhook will ever arrive, so the Transaction
+    // would stay `processing` forever and the worker would never get the
+    // "₦X sent to GTBank" push. Auto-confirm locally via the settlement
+    // helper — same code path as the webhook handler in production.
+    if (this.squad.isStubMode()) {
+      void this.settlement
+        .applyTerminalOutcome({
+          transactionId: result.transaction.id,
+          outcome: {
+            kind: 'transfer',
+            dbStatus: 'completed',
+            terminal: true,
+          },
+          source: 'stub',
+        })
+        .catch((err) =>
+          this.logger.error(
+            `[withdrawal] stub completion failed for txn=${result.transaction.id}: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
     }
 
     return {
@@ -233,8 +280,15 @@ export class WithdrawalsService {
         subtitle: result.transaction.subtitle,
         squad_reference: result.transaction.squadReference,
         related_job_id: result.transaction.relatedJobId,
+        bank_account_summary: dest.bankAccountId
+          ? {
+              bank_name: dest.bankName,
+              account_number_last4: last4,
+            }
+          : null,
       },
       wallet_balance_after: result.walletBalanceAfter,
     };
   }
+
 }

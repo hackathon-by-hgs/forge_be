@@ -287,7 +287,11 @@ export class SessionsService {
         data: {
           id: workerNotificationId,
           workerId,
-          kind: 'payment_held_for_review',
+          // Coarse kind per 19_notifications.md; pushKind drives the
+          // §11.7 hold-window FCM channel (no `opay_credit` sound — pay
+          // hasn't landed yet).
+          kind: 'payment',
+          pushKind: 'payment_held_for_review',
           title: 'Your work is being verified',
           body: `₦${s.payAmountPending.toLocaleString('en-NG')} lands automatically in ${holdMinutes < 60 ? `${holdMinutes}m` : `${Math.round(holdMinutes / 60)}h`} if all looks good.`,
           timestamp: clockOutAt,

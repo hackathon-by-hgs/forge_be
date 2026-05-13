@@ -15,6 +15,7 @@ import { AuditService } from '../../common/audit/audit.service';
 import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { StreamPublisher } from '../stream/stream.publisher';
+import { WithdrawalSettlementService } from '../wallet/withdrawal-settlement.service';
 import { SquadClient, SquadWebhookEvent } from './squad.client';
 import { classifySquadOutcome } from './squad-status';
 
@@ -28,6 +29,7 @@ export class SquadWebhookController {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly stream: StreamPublisher,
+    private readonly settlement: WithdrawalSettlementService,
   ) {}
 
   @Post()
@@ -116,44 +118,26 @@ export class SquadWebhookController {
       return { received: true };
     }
 
-    // Idempotent on already-final states.
-    if (txn.status === outcome.dbStatus) {
+    // Hand off to the settlement helper. It owns the CAS-protected status
+    // flip, the conditional withdrawal refund, audit, SSE fan-out, and
+    // the worker push — same code path as the reconciliation cron, so a
+    // dropped webhook → cron-resolved outcome converges to identical
+    // side effects.
+    const result = await this.settlement.applyTerminalOutcome({
+      transactionId: txn.id,
+      outcome,
+      source: 'webhook',
+    });
+
+    if (!result.applied) {
+      this.logger.log(
+        `[squad-webhook] reference=${reference} already terminal — replay/race no-op`,
+      );
       return { received: true };
     }
 
-    await this.prisma.transaction.update({
-      where: { id: txn.id },
-      data: {
-        status: outcome.dbStatus,
-        settledAt: outcome.terminal ? new Date() : txn.settledAt,
-        failureReason: outcome.failureReason ?? null,
-      },
-    });
-
-    await this.audit.record({
-      actor: { type: 'system' },
-      action: `squad.webhook_${outcome.dbStatus}`,
-      entityType: 'transaction',
-      entityId: txn.id,
-      before: { status: txn.status },
-      after: { status: outcome.dbStatus, reference, eventName },
-    });
-
-    if (txn.employerId) {
-      this.stream.publish({
-        scope: { kind: 'employer', id: txn.employerId },
-        event: 'transaction.updated',
-        data: {
-          transactionId: txn.id,
-          status: outcome.dbStatus,
-          amountNaira: txn.amount,
-          source: 'webhook',
-        },
-      });
-    }
-
     this.logger.log(
-      `[squad-webhook] reference=${reference} ${txn.status} → ${outcome.dbStatus}`,
+      `[squad-webhook] reference=${reference} → ${outcome.dbStatus} (refunded=${result.refunded}, push=${result.pushQueued})`,
     );
     return { received: true };
   }

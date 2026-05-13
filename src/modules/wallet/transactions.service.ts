@@ -7,6 +7,18 @@ import {
   TransactionsQueryDto,
 } from './dto/transaction.dto';
 
+/**
+ * Status values that count as "money is moving (or has moved)" and should
+ * appear in the ledger. Anything else — `failed`, `reversed`, `cancelled` —
+ * means the funds bounced back to the worker and shouldn't display.
+ *
+ * `processing` is included so withdrawals show in the list the moment the
+ * worker confirms (Squad webhook hasn't landed yet but the wallet is
+ * already debited — hiding the row would make the worker think it vanished,
+ * which is the bug we're fixing).
+ */
+const VISIBLE_STATUSES = ['processing', 'succeeded', 'completed'] as const;
+
 @Injectable()
 export class TransactionsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -17,7 +29,7 @@ export class TransactionsService {
 
     const where: Record<string, unknown> = {
       workerId,
-      status: 'succeeded',
+      status: { in: [...VISIBLE_STATUSES] },
       ...(q.kinds?.length ? { kind: { in: q.kinds } } : {}),
     };
     if (cursor) {
@@ -37,17 +49,54 @@ export class TransactionsService {
     const page = rows.slice(0, limit);
     const last = page.at(-1);
 
+    // Eager-load BankAccount rows for any withdrawal entries on the page so
+    // the list item can render "Withdrawal · GTBank ****6789" without a
+    // second fetch. One IN-query covers the whole page.
+    const bankAccountIds = Array.from(
+      new Set(
+        page
+          .filter((t) => t.kind === 'withdrawal' && t.bankAccountId)
+          .map((t) => t.bankAccountId as string),
+      ),
+    );
+    const bankAccountsById = new Map<
+      string,
+      { bankName: string; accountNumber: string }
+    >();
+    if (bankAccountIds.length > 0) {
+      const bas = await this.prisma.bankAccount.findMany({
+        where: { id: { in: bankAccountIds } },
+        select: { id: true, bankName: true, accountNumber: true },
+      });
+      for (const ba of bas) {
+        bankAccountsById.set(ba.id, {
+          bankName: ba.bankName,
+          accountNumber: ba.accountNumber,
+        });
+      }
+    }
+
     return {
-      items: page.map((t) => ({
-        id: t.id,
-        kind: t.kind as TransactionKind,
-        amount: t.amount,
-        timestamp: t.timestamp.toISOString(),
-        title: t.title,
-        subtitle: t.subtitle,
-        squad_reference: t.squadReference,
-        related_job_id: t.relatedJobId,
-      })),
+      items: page.map((t) => {
+        const ba = t.bankAccountId ? bankAccountsById.get(t.bankAccountId) : null;
+        return {
+          id: t.id,
+          kind: t.kind as TransactionKind,
+          amount: t.amount,
+          timestamp: t.timestamp.toISOString(),
+          title: t.title,
+          subtitle: t.subtitle,
+          squad_reference: t.squadReference,
+          related_job_id: t.relatedJobId,
+          bank_account_summary:
+            t.kind === 'withdrawal' && ba
+              ? {
+                  bank_name: ba.bankName,
+                  account_number_last4: ba.accountNumber.slice(-4),
+                }
+              : null,
+        };
+      }),
       next_cursor: hasMore && last
         ? encodeCursor({ ts: last.timestamp.toISOString(), id: last.id })
         : null,

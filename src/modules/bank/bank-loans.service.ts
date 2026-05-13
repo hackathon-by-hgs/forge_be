@@ -242,7 +242,10 @@ export class BankLoansService {
           data: {
             id: workerNotificationId!,
             workerId: loan.workerId,
-            kind: 'loan_disbursed',
+            // 19_notifications.md — coarse kind is `loan`; pushKind keeps
+            // the granular variant for the payments-channel sound.
+            kind: 'loan',
+            pushKind: 'loan_disbursed',
             title: 'Loan disbursed',
             body: `₦${principalNaira.toLocaleString('en-NG')} has been disbursed to your wallet.`,
             timestamp: now,
@@ -383,7 +386,8 @@ export class BankLoansService {
             data: {
               id: workerNotificationId,
               workerId: repayment.loan.workerId,
-              kind: 'loan_repayment_made',
+              kind: 'loan',
+              pushKind: 'loan_repayment_made',
               title: 'Loan fully repaid',
               body: 'Your loan has been fully repaid. Thanks for being a great borrower.',
               timestamp: now,

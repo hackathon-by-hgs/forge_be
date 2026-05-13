@@ -53,7 +53,12 @@ export class WithdrawalsController {
     ].join('\n\n'),
   })
   @ApiResponse({ status: 200, type: WithdrawalPreviewResponseDto })
-  @ApiResponse({ status: 422, type: ErrorResponseDto, description: 'BELOW_MINIMUM | BANK_NOT_FOUND' })
+  @ApiResponse({
+    status: 422,
+    type: ErrorResponseDto,
+    description:
+      'BELOW_MINIMUM | INSUFFICIENT_BALANCE | BANK_NOT_FOUND | NO_BANK_LINKED',
+  })
   preview(@CurrentWorker() me: AuthedWorker, @Query() q: WithdrawalPreviewQueryDto) {
     return this.withdrawals.preview(me.workerId, q);
   }
@@ -72,7 +77,11 @@ export class WithdrawalsController {
     ].join('\n\n'),
   })
   @ApiResponse({ status: 201, type: WithdrawResponseDto })
-  @ApiResponse({ status: 422, type: ErrorResponseDto, description: 'INSUFFICIENT_BALANCE | BELOW_MINIMUM' })
+  @ApiResponse({
+    status: 422,
+    type: ErrorResponseDto,
+    description: 'INSUFFICIENT_BALANCE | BELOW_MINIMUM | NO_BANK_LINKED | BANK_NOT_FOUND',
+  })
   @ApiResponse({ status: 502, type: ErrorResponseDto, description: 'PAYMENT_PROVIDER_UNAVAILABLE' })
   async submit(
     @CurrentWorker() me: AuthedWorker,
