@@ -1,9 +1,22 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsEnum, IsString, Matches } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsEnum, IsOptional, IsString, Matches } from 'class-validator';
 
 export enum OtpFlow {
   Login = 'login',
   Signup = 'signup',
+}
+
+export enum PreferredOtpChannel {
+  Auto = 'auto',
+  WhatsApp = 'whatsapp',
+  Sms = 'sms',
+  Push = 'push',
+}
+
+export enum OtpChannelUsed {
+  WhatsApp = 'whatsapp',
+  Sms = 'sms',
+  Push = 'push',
 }
 
 const E164_NIGERIA = /^\+234\d{10}$/;
@@ -17,6 +30,19 @@ export class RequestOtpDto {
   @ApiProperty({ enum: OtpFlow, example: OtpFlow.Login })
   @IsEnum(OtpFlow)
   flow!: OtpFlow;
+
+  @ApiPropertyOptional({
+    enum: PreferredOtpChannel,
+    example: PreferredOtpChannel.Auto,
+    description: [
+      'Channel hint: `auto` (default — server picks the best channel),',
+      '`whatsapp`, `sms`, or `push`. Forcing `push` returns `422 NO_PUSH_DEVICE`',
+      'if the phone has no registered Forge app device.',
+    ].join(' '),
+  })
+  @IsOptional()
+  @IsEnum(PreferredOtpChannel)
+  preferred_channel?: PreferredOtpChannel;
 }
 
 export class RequestOtpResponseDto {
@@ -28,4 +54,19 @@ export class RequestOtpResponseDto {
 
   @ApiProperty({ example: 30, description: 'Cooldown before another request is allowed.' })
   resend_after_seconds!: number;
+
+  @ApiProperty({
+    enum: OtpChannelUsed,
+    example: OtpChannelUsed.WhatsApp,
+    description:
+      'Channel the OTP was dispatched on. May differ from `preferred_channel` after a fall-through (e.g. push delivery failed and the server fell back to WhatsApp).',
+  })
+  channel!: OtpChannelUsed;
+
+  @ApiProperty({
+    example: 'your WhatsApp',
+    description:
+      'Pre-localised hint for the OTP screen — paste verbatim into copy like "Code sent to {channel_hint}".',
+  })
+  channel_hint!: string;
 }

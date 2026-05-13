@@ -188,6 +188,41 @@ export const appConfig = () => {
       smsSenderId: process.env.SQUAD_SMS_SENDER_ID ?? 'FORGE',
     },
 
+    // Firebase Cloud Messaging — worker mobile push notifications. Stub mode
+    // (no service-account JSON) logs the would-be payload and returns success
+    // so dev/CI works without Firebase access. Production MUST provide either
+    // FCM_SERVICE_ACCOUNT_JSON (single env var with the inlined JSON) or the
+    // discrete FCM_PROJECT_ID / FCM_CLIENT_EMAIL / FCM_PRIVATE_KEY triple.
+    fcm: {
+      provider: (process.env.FCM_PROVIDER ??
+        (process.env.FCM_SERVICE_ACCOUNT_JSON || process.env.FCM_PRIVATE_KEY
+          ? 'real'
+          : 'stub')) as 'real' | 'stub',
+      serviceAccountJson: process.env.FCM_SERVICE_ACCOUNT_JSON ?? null,
+      projectId: process.env.FCM_PROJECT_ID ?? null,
+      clientEmail: process.env.FCM_CLIENT_EMAIL ?? null,
+      // PEM private key. Railway/Vercel env vars often replace newlines with
+      // literal `\n` — normalised at use.
+      privateKey: process.env.FCM_PRIVATE_KEY ?? null,
+    },
+
+    // OTP delivery channel selection. `default` is the fallback when the
+    // mobile sends `preferred_channel=auto` and no other signal applies.
+    otpChannels: {
+      // Whether the WhatsApp channel is wired up server-side. When false we
+      // skip past it and go straight to SMS — useful while the Termii
+      // WhatsApp template / Meta business approval is in flight.
+      whatsappEnabled:
+        (process.env.OTP_WHATSAPP_ENABLED ?? 'true') === 'true',
+      pushEnabled: (process.env.OTP_PUSH_ENABLED ?? 'true') === 'true',
+      // Public `/v1/auth/otp/channels` rate limit — protects against phone
+      // enumeration even though we always return `available: true`.
+      channelsLookupPerPhonePer15Min: parseInt(
+        process.env.OTP_CHANNELS_LOOKUP_PER_PHONE_PER_15_MIN ?? '10',
+        10,
+      ),
+    },
+
     // Anthropic (Claude) — `/v1/ai/*` endpoints. Stub mode (no key) returns
     // deterministic canned outputs so mobile signup + jobs feed work without
     // hitting the AI vendor.

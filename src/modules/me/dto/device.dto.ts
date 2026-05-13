@@ -24,3 +24,16 @@ export class RegisterDeviceDto {
   @IsString()
   app_version?: string;
 }
+
+export class RegisteredDeviceDto {
+  @ApiProperty({ example: 'dvc_8a1b3c4d5e6f7g8h', description: 'Stable per-install id.' })
+  id!: string;
+
+  @ApiProperty({ example: '2026-05-13T10:23:11Z' })
+  registered_at!: string;
+}
+
+export class RegisterDeviceResponseDto {
+  @ApiProperty({ type: RegisteredDeviceDto })
+  device!: RegisteredDeviceDto;
+}

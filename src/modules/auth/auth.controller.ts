@@ -34,6 +34,10 @@ import {
   ProfileSetupResponseDto,
 } from './dto/profile-setup.dto';
 import { RefreshDto, TokenPairDto } from './dto/refresh.dto';
+import {
+  OtpChannelsLookupDto,
+  OtpChannelsResponseDto,
+} from './dto/otp-channels.dto';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -46,13 +50,22 @@ export class AuthController {
   @Post('otp/request')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Request an SMS OTP for login or signup.',
+    summary: 'Request an OTP for login or signup. Picks the channel automatically.',
     description: [
       '**Audience:** Worker mobile app (Flutter).',
       '**Powers:** "Enter phone number" screen on first launch and re-login.',
-      '**Behavior:** Sends OTP via Termii. Rate-limited to 5/15min per phone (BACKEND_BRIEF §6).',
-      'Returns a `challenge_id` the client passes back to `/auth/otp/verify`.',
-      'In dev with `OTP_DEBUG_EXPOSE=true`, also retrievable via `/auth/otp/debug/{challengeId}`.',
+      '**Behavior:** Server picks one of three channels and dispatches the code:',
+      '',
+      '1. **`push` (FCM)** — used when the phone matches an existing worker who has ≥1 registered device.',
+      '   The mobile reads the code from `data.code` / `data.deeplink` and pre-fills the OTP screen.',
+      '2. **`whatsapp`** — default for returning users without a device and for signups. Free-tier on Termii.',
+      '3. **`sms`** — last-resort fallback when WhatsApp dispatch fails.',
+      '',
+      'Pass `preferred_channel=auto` (default) to let the server pick, or force `whatsapp` / `sms` / `push` ',
+      'for support tooling. `preferred_channel=push` returns `422 NO_PUSH_DEVICE` if the phone has no app.',
+      '',
+      'Rate-limited to 3 OTPs / phone / 15 min. Response carries `channel` + `channel_hint` so the mobile ',
+      'can render "Code sent to {channel_hint}".',
     ].join('\n\n'),
   })
   @ApiBody({ type: RequestOtpDto })
@@ -60,9 +73,36 @@ export class AuthController {
   @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'VALIDATION_FAILED' })
   @ApiResponse({ status: 404, type: ErrorResponseDto, description: 'PHONE_NOT_FOUND (login)' })
   @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'PHONE_ALREADY_EXISTS (signup)' })
+  @ApiResponse({ status: 422, type: ErrorResponseDto, description: 'NO_PUSH_DEVICE (preferred_channel=push, no device)' })
   @ApiResponse({ status: 429, type: ErrorResponseDto, description: 'RATE_LIMITED' })
+  @ApiResponse({ status: 502, type: ErrorResponseDto, description: 'CHANNEL_UNAVAILABLE (all dispatch channels failed)' })
   requestOtp(@Body() body: RequestOtpDto) {
     return this.auth.requestOtp(body);
+  }
+
+  @Post('otp/channels')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'List OTP delivery channels available for a phone. Public + rate-limited.',
+    description: [
+      '**Audience:** Worker mobile app (Flutter) — OTP screen "Try a different channel" sheet.',
+      '**Powers:** Renders the "Send via WhatsApp / Send via SMS / Send to my app" buttons before login.',
+      '',
+      '**No auth required** — runs before the worker has any credentials.',
+      '',
+      '**Privacy:** Always returns `available: true` for all three channels and `default: "auto"` regardless ',
+      "of whether the phone matches a known user, so the endpoint can't be used as a phone-enumeration ",
+      'oracle. The real routing decision happens server-side in `POST /auth/otp/request`.',
+      '',
+      '**Rate limit:** 10 requests / phone / 15 min (env: `OTP_CHANNELS_LOOKUP_PER_PHONE_PER_15_MIN`).',
+    ].join('\n\n'),
+  })
+  @ApiBody({ type: OtpChannelsLookupDto })
+  @ApiResponse({ status: 200, type: OtpChannelsResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'VALIDATION_FAILED' })
+  @ApiResponse({ status: 429, type: ErrorResponseDto, description: 'RATE_LIMITED' })
+  channels(@Body() body: OtpChannelsLookupDto): OtpChannelsResponseDto {
+    return this.auth.channelsForPhone(body.phone) as unknown as OtpChannelsResponseDto;
   }
 
   @Post('otp/verify')

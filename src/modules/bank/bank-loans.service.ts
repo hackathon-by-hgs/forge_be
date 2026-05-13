@@ -8,6 +8,7 @@ import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { paginate } from '../../common/pagination/offset.dto';
 import { SquadClient } from '../squad/squad.client';
 import { StreamPublisher } from '../stream/stream.publisher';
+import { PushNotificationService } from '../messaging/push-notification.service';
 import {
   BankLoansListQueryDto,
   BankLoansListResponseDto,
@@ -34,6 +35,7 @@ export class BankLoansService {
     private readonly audit: AuditService,
     private readonly squad: SquadClient,
     private readonly stream: StreamPublisher,
+    private readonly push: PushNotificationService,
   ) {}
 
   async list(
@@ -159,6 +161,9 @@ export class BankLoansService {
       }
     }
 
+    const workerNotificationId = loan.workerId
+      ? `ntf_${loanId}_disb`.slice(0, 24)
+      : null;
     const updated = await this.prisma.$transaction(async (tx) => {
       const u = await tx.loan.update({
         where: { id: loanId },
@@ -231,16 +236,17 @@ export class BankLoansService {
         });
       }
       // Worker-mobile notification (only meaningful for worker borrowers).
+      // Id is captured so the push fires after the transaction commits.
       if (loan.workerId) {
         await tx.notification.create({
           data: {
-            id: `ntf_${loanId}_disb`.slice(0, 24),
+            id: workerNotificationId!,
             workerId: loan.workerId,
             kind: 'loan_disbursed',
             title: 'Loan disbursed',
             body: `₦${principalNaira.toLocaleString('en-NG')} has been disbursed to your wallet.`,
             timestamp: now,
-            deeplink: '/loans',
+            deeplink: `/loans/${loanId}`,
           },
         });
       }
@@ -274,6 +280,10 @@ export class BankLoansService {
       event: 'loan.disbursed',
       data: { loanId, principalNaira, borrowerType: loan.borrowerType },
     });
+
+    if (workerNotificationId) {
+      void this.push.sendForNotificationRow(workerNotificationId);
+    }
 
     // For business borrowers, tell the employer dashboard too so the wallet
     // tile + transactions table refresh without polling.
@@ -349,26 +359,28 @@ export class BankLoansService {
           riskLevel: allPaid ? LoanRiskLevel.Green : repayment.loan.riskLevel,
         },
       });
+      let workerNotificationId: string | null = null;
       if (allPaid) {
         await tx.bank.update({
           where: { id: bid },
           data: { totalActiveLoans: { decrement: 1 } },
         });
         if (repayment.loan.workerId) {
+          workerNotificationId = `ntf_${repayment.loanId}_repaid`.slice(0, 24);
           await tx.notification.create({
             data: {
-              id: `ntf_${repayment.loanId}_repaid`.slice(0, 24),
+              id: workerNotificationId,
               workerId: repayment.loan.workerId,
               kind: 'loan_repayment_made',
               title: 'Loan fully repaid',
               body: 'Your loan has been fully repaid. Thanks for being a great borrower.',
               timestamp: now,
-              deeplink: '/loans',
+              deeplink: `/loans/${repayment.loanId}`,
             },
           });
         }
       }
-      return r;
+      return { r, workerNotificationId };
     });
 
     await this.audit.record({
@@ -396,7 +408,11 @@ export class BankLoansService {
       },
     });
 
-    return toLoanRepaymentDto(updated);
+    if (updated.workerNotificationId) {
+      void this.push.sendForNotificationRow(updated.workerNotificationId);
+    }
+
+    return toLoanRepaymentDto(updated.r);
   }
 
   // ── Internals ────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppError } from '../../common/utils/app-error';
@@ -8,10 +8,12 @@ import {
   encodeCursor,
 } from '../../common/pagination/cursor.util';
 import { VirtualAccountProvisioner } from '../squad/virtual-account-provisioner.service';
+import { OtpChannelService } from '../messaging/otp-channel.service';
+import { OtpChannelUsed } from '../auth/dto/request-otp.dto';
 import { toWorkerDto } from './me.mapper';
 import { EditProfileDto } from './dto/edit-profile.dto';
 import { PreferencesDto, PreferencesPatchDto } from './dto/preferences.dto';
-import { RegisterDeviceDto } from './dto/device.dto';
+import { RegisterDeviceDto, RegisterDeviceResponseDto } from './dto/device.dto';
 import {
   AccountDeletionResponseDto,
   PhoneChangeRequestDto,
@@ -21,10 +23,13 @@ import * as argon2 from 'argon2';
 
 @Injectable()
 export class MeService {
+  private readonly logger = new Logger(MeService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly virtualAccount: VirtualAccountProvisioner,
+    private readonly otpChannel: OtpChannelService,
   ) {}
 
   async me(workerId: string) {
@@ -193,6 +198,12 @@ export class MeService {
     const cooldown = this.config.get<number>('otp.resendCooldownSeconds')!;
     const code = Math.floor(100_000 + Math.random() * 900_000).toString();
     const codeHash = await argon2.hash(code);
+
+    // Phone-change is always to a brand-new number (we just enforced uniqueness),
+    // so push is not an option. Skip the channel picker's user-lookup and go
+    // straight to WhatsApp-or-SMS.
+    const picked = await this.otpChannel.pickChannel(body.new_phone, 'auto');
+
     const challenge = await this.prisma.otpChallenge.create({
       data: {
         id: newId(ID_PREFIXES.challenge),
@@ -204,10 +215,30 @@ export class MeService {
         resendAfter: new Date(Date.now() + cooldown * 1000),
       },
     });
+    const ttlMinutes = Math.max(1, Math.round(ttl / 60));
+    let used: { channel: OtpChannelUsed; hint: string } = {
+      channel: picked.channel as OtpChannelUsed,
+      hint: picked.hint,
+    };
+    try {
+      const outcome = await this.otpChannel.sendOtp(picked, {
+        phone: body.new_phone,
+        code,
+        challengeId: challenge.id,
+        ttlMinutes,
+      });
+      used = { channel: outcome.channel as OtpChannelUsed, hint: outcome.hint };
+    } catch (err) {
+      this.logger.error(
+        `[me/phone-change] OTP dispatch failed for ${body.new_phone}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return {
       challenge_id: challenge.id,
       expires_at: challenge.expiresAt.toISOString(),
       resend_after_seconds: cooldown,
+      channel: used.channel,
+      channel_hint: used.hint,
     };
   }
 
@@ -253,8 +284,8 @@ export class MeService {
   async registerDevice(
     workerId: string,
     body: RegisterDeviceDto,
-  ): Promise<void> {
-    await this.prisma.deviceToken.upsert({
+  ): Promise<RegisterDeviceResponseDto> {
+    const row = await this.prisma.deviceToken.upsert({
       where: { workerId_deviceId: { workerId, deviceId: body.device_id } },
       create: {
         id: newId(ID_PREFIXES.device),
@@ -270,6 +301,23 @@ export class MeService {
         appVersion: body.app_version ?? null,
       },
     });
+    return {
+      device: {
+        id: row.deviceId,
+        registered_at: row.createdAt.toISOString(),
+      },
+    };
+  }
+
+  /**
+   * Best-effort delete keyed on (worker, device_id). Returns silently when
+   * the row is already gone — the mobile fires this on logout and we don't
+   * want a stale row on the server to flap an error.
+   */
+  async unregisterDevice(workerId: string, deviceId: string): Promise<void> {
+    await this.prisma.deviceToken
+      .deleteMany({ where: { workerId, deviceId } })
+      .catch(() => undefined);
   }
 
   async listNotifications(

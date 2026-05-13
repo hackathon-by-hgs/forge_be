@@ -21,6 +21,7 @@ import { EmployerJobsModule } from './modules/employer-jobs/employer-jobs.module
 import { EmployerPaymentsModule } from './modules/employer-payments/employer-payments.module';
 import { BankModule } from './modules/bank/bank.module';
 import { SquadModule } from './modules/squad/squad.module';
+import { MessagingModule } from './modules/messaging/messaging.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { SearchModule } from './modules/search/search.module';
 import { SettingsModule } from './modules/settings/settings.module';
@@ -62,6 +63,9 @@ import { AiModule } from './modules/ai/ai.module';
 
     // Payment provider (global — exports SquadClient + mounts webhook)
     SquadModule,
+
+    // FCM push + OTP channel routing (global).
+    MessagingModule,
 
     // Hire→clock-out lifecycle automation (cron jobs).
     LifecycleModule,

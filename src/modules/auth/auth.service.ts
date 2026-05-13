@@ -8,7 +8,9 @@ import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { toWorkerDto } from '../me/me.mapper';
 import { SquadClient } from '../squad/squad.client';
 import { VirtualAccountProvisioner } from '../squad/virtual-account-provisioner.service';
+import { OtpChannelService } from '../messaging/otp-channel.service';
 import {
+  OtpChannelUsed,
   OtpFlow,
   RequestOtpDto,
   RequestOtpResponseDto,
@@ -30,6 +32,7 @@ export class AuthService {
     private readonly config: ConfigService,
     private readonly virtualAccount: VirtualAccountProvisioner,
     private readonly squad: SquadClient,
+    private readonly otpChannel: OtpChannelService,
   ) {}
 
   // ── OTP request ────────────────────────────────────────────────────────────
@@ -73,6 +76,11 @@ export class AuthService {
     const codeHash = await argon2.hash(code);
     const now = Date.now();
 
+    // Pick the channel BEFORE creating the challenge so a forced
+    // `preferred_channel=push` with no device returns 422 without leaving a
+    // stray OtpChallenge behind.
+    const picked = await this.otpChannel.pickChannel(body.phone, body.preferred_channel);
+
     const challenge = await this.prisma.otpChallenge.create({
       data: {
         id: newId(ID_PREFIXES.challenge),
@@ -90,28 +98,46 @@ export class AuthService {
       );
     }
 
-    // Dispatch via Squad SMS — fire-and-forget so a Squad SMS outage doesn't
-    // block OTP request. Stub mode logs + returns success. Real mode hits
-    // Squad's SMS endpoint; on failure the worker can request a resend.
+    // Dispatch via the chosen channel. Fire-and-forget so a provider outage
+    // doesn't block the request — the worker can hit Resend on failure.
     const ttlMinutes = Math.max(1, Math.round(ttl / 60));
-    void this.squad
-      .sendSms({
-        to: body.phone,
-        message: `Your Forge code is ${code}. Expires in ${ttlMinutes} min. Don't share this code.`,
-      })
-      .then((outcome) => {
-        if (!outcome.accepted) {
-          this.logger.warn(
-            `[otp] sms dispatch reported not-accepted for ${body.phone}: ${outcome.message}`,
-          );
-        }
+    let used: { channel: OtpChannelUsed; hint: string } = {
+      channel: picked.channel as OtpChannelUsed,
+      hint: picked.hint,
+    };
+    try {
+      const outcome = await this.otpChannel.sendOtp(picked, {
+        phone: body.phone,
+        code,
+        challengeId: challenge.id,
+        ttlMinutes,
       });
+      used = { channel: outcome.channel as OtpChannelUsed, hint: outcome.hint };
+    } catch (err) {
+      this.logger.error(
+        `[otp] dispatch threw for ${body.phone} challenge=${challenge.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     return {
       challenge_id: challenge.id,
       expires_at: challenge.expiresAt.toISOString(),
       resend_after_seconds: cooldown,
+      channel: used.channel,
+      channel_hint: used.hint,
     };
+  }
+
+  /**
+   * Public `POST /v1/auth/otp/channels` payload — what channels the mobile can
+   * pick from for THIS phone. Always returns `available: true` for all three
+   * and `default: "auto"` so the endpoint can't be used as a phone-existence
+   * oracle. The actual routing decision happens server-side in `/request`.
+   *
+   * Rate-limited per phone to make scraping expensive.
+   */
+  channelsForPhone(phone: string): ReturnType<OtpChannelService['enumerate']> {
+    return this.otpChannel.enumerate(phone);
   }
 
   // ── OTP verify ────────────────────────────────────────────────────────────

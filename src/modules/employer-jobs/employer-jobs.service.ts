@@ -41,6 +41,7 @@ import {
   UpdateJobDto,
 } from './dto/job-mutations.dto';
 import { JobReservationService } from './job-reservation.service';
+import { PushNotificationService } from '../messaging/push-notification.service';
 import {
   mapDashboardTypeToDbValues,
   mapJobTypeToDashboard,
@@ -85,6 +86,7 @@ export class EmployerJobsService {
     private readonly config: ConfigService,
     private readonly audit: AuditService,
     private readonly reservation: JobReservationService,
+    private readonly push: PushNotificationService,
   ) {}
 
   // ── List (paginated, filterable, sortable) ───────────────────────────────
@@ -572,10 +574,12 @@ export class EmployerJobsService {
         },
       });
       // Notify the assigned worker (if any) via the worker-mobile notifications table.
+      let pushNotificationId: string | null = null;
       if (before.assignedWorkerId) {
+        pushNotificationId = newId(ID_PREFIXES.notification);
         await tx.notification.create({
           data: {
-            id: newId(ID_PREFIXES.notification),
+            id: pushNotificationId,
             workerId: before.assignedWorkerId,
             kind: 'job_cancelled',
             title: 'Job cancelled',
@@ -587,8 +591,11 @@ export class EmployerJobsService {
           },
         });
       }
-      return j;
+      return { j, pushNotificationId };
     });
+    if (updated.pushNotificationId) {
+      void this.push.sendForNotificationRow(updated.pushNotificationId);
+    }
 
     await this.audit.record({
       actor: { type: 'user', id: actor.userId },
@@ -600,7 +607,7 @@ export class EmployerJobsService {
       request: req,
     });
 
-    return toDashboardJob(updated, updated.assignedWorker) as JobDto;
+    return toDashboardJob(updated.j, updated.j.assignedWorker) as JobDto;
   }
 
   // ── Accept application (atomic auto-reject siblings) ─────────────────────
@@ -695,33 +702,44 @@ export class EmployerJobsService {
       }
 
       // Worker notifications — single tx so a retry doesn't double-notify.
+      // Capture ids so push fan-out fires after commit (best-effort).
+      const acceptedNotificationId = newId(ID_PREFIXES.notification);
       await tx.notification.create({
         data: {
-          id: newId(ID_PREFIXES.notification),
+          id: acceptedNotificationId,
           workerId: target.workerId,
           kind: 'application_accepted',
           title: 'Application accepted',
           body: `Your application for "${job.title}" was accepted.`,
           timestamp: now,
-          deeplink: `/jobs/${jobId}`,
+          deeplink: `/jobs/${jobId}/status`,
         },
       });
+      const rejectedNotificationIds: string[] = [];
       for (const sib of rejectedSiblings) {
+        const nid = newId(ID_PREFIXES.notification);
+        rejectedNotificationIds.push(nid);
         await tx.notification.create({
           data: {
-            id: newId(ID_PREFIXES.notification),
+            id: nid,
             workerId: sib.workerId,
             kind: 'application_rejected',
             title: 'Job filled',
             body: `Another worker was selected for "${job.title}".`,
             timestamp: now,
-            deeplink: `/jobs/${jobId}`,
+            deeplink: `/jobs/${jobId}/status`,
           },
         });
       }
 
-      return accepted;
+      return { accepted, acceptedNotificationId, rejectedNotificationIds };
     });
+
+    // Post-commit fan-out — best-effort, never blocks the response.
+    void this.push.sendForNotificationRow(result.acceptedNotificationId);
+    for (const nid of result.rejectedNotificationIds) {
+      void this.push.sendForNotificationRow(nid);
+    }
 
     await this.audit.record({
       actor: { type: 'user', id: actor.userId },
@@ -732,7 +750,7 @@ export class EmployerJobsService {
       request: req,
     });
 
-    const item = toDashboardApplication(result, result.worker);
+    const item = toDashboardApplication(result.accepted, result.accepted.worker);
     return { ...item, rankScore: 1 };
   }
 
@@ -778,19 +796,21 @@ export class EmployerJobsService {
           },
         },
       });
+      const notificationId = newId(ID_PREFIXES.notification);
       await tx.notification.create({
         data: {
-          id: newId(ID_PREFIXES.notification),
+          id: notificationId,
           workerId: target.workerId,
           kind: 'application_rejected',
           title: 'Application not accepted',
           body: `Your application was not selected this time.`,
           timestamp: now,
-          deeplink: `/jobs/${jobId}`,
+          deeplink: `/jobs/${jobId}/status`,
         },
       });
-      return a;
+      return { a, notificationId };
     });
+    void this.push.sendForNotificationRow(updated.notificationId);
 
     await this.audit.record({
       actor: { type: 'user', id: actor.userId },
@@ -801,7 +821,7 @@ export class EmployerJobsService {
       request: req,
     });
 
-    const item = toDashboardApplication(updated, updated.worker);
+    const item = toDashboardApplication(updated.a, updated.a.worker);
     return { ...item, rankScore: 0 };
   }
 

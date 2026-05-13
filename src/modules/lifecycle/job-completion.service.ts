@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { StreamPublisher } from '../stream/stream.publisher';
+import { PushNotificationService } from '../messaging/push-notification.service';
 
 /** Internal — what each `worker_late` notification touches in the DB. */
 const EMPLOYER_BUSINESS_ROLES = [
@@ -27,6 +28,9 @@ export interface CompletionOutcome {
   amountNaira: number;
   /** Transaction row id created for this completion (`txn_…`). */
   transactionId: string;
+  /** Worker `Notification` row created for the payment. Fed to FCM by the
+   *  caller after the transaction commits — see `publishLifecycle`. */
+  notificationId: string;
   /** `succeeded` when the employer wallet covered it; `pending` when not (or
    *  when payouts are paused). Worker wallet is only credited on `succeeded`. */
   paymentStatus: 'succeeded' | 'pending';
@@ -55,6 +59,7 @@ export class JobCompletionService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stream: StreamPublisher,
+    private readonly push: PushNotificationService,
   ) {}
 
   /**
@@ -85,9 +90,16 @@ export class JobCompletionService {
   }
 
   /**
-   * Fan out the post-completion SSE events to the employer dashboard. Safe to
-   * call from either caller (clock-out or cron) once their transaction has
-   * committed — payloads match the contract documented in [[FE_PHASE4_CLOSEOUT]].
+   * Fan out the post-completion signals after the transaction has committed:
+   *
+   *  - **Employer dashboard SSE** — `job.lifecycle_changed` + `transaction.updated`
+   *    so the active-map / Overview / Payments surfaces refresh without polling.
+   *  - **Worker FCM push** — fires the payment notification on the worker's
+   *    handset. Best-effort; a downed FCM never blocks the originating state
+   *    change.
+   *
+   * Safe to call from either caller (clock-out or cron) once their transaction
+   * has committed.
    */
   publishLifecycle(outcome: CompletionOutcome): void {
     this.stream.publish({
@@ -109,6 +121,13 @@ export class JobCompletionService {
         source: 'job_completion',
       },
     });
+    void this.push
+      .sendForNotificationRow(outcome.notificationId)
+      .catch((err) =>
+        this.logger.warn(
+          `[push] payment notification dispatch failed for worker=${outcome.workerId}: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
   }
 
   // ── Internal ─────────────────────────────────────────────────────────────
@@ -327,9 +346,12 @@ export class JobCompletionService {
     });
 
     // 6) Worker mobile notification — "₦{amount} arrived" / "payment pending".
+    //    The id is returned through `CompletionOutcome.notificationId` so the
+    //    caller can fire the FCM push after the transaction commits.
+    const notificationId = newId(ID_PREFIXES.notification);
     await tx.notification.create({
       data: {
-        id: newId(ID_PREFIXES.notification),
+        id: notificationId,
         workerId: worker.id,
         kind:
           paymentStatus === 'succeeded'
@@ -385,6 +407,7 @@ export class JobCompletionService {
       workerId: worker.id,
       amountNaira: amount,
       transactionId,
+      notificationId,
       paymentStatus,
       pendingReason,
       loanRepaymentNaira,

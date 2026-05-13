@@ -32,7 +32,7 @@ import {
   PhoneChangeConfirmDto,
   PhoneChangeRequestDto,
 } from './dto/account.dto';
-import { RegisterDeviceDto } from './dto/device.dto';
+import { RegisterDeviceDto, RegisterDeviceResponseDto } from './dto/device.dto';
 import { NotificationsListDto } from './dto/notification.dto';
 import { RequestOtpResponseDto } from '../auth/dto/request-otp.dto';
 
@@ -161,21 +161,48 @@ export class MeController {
 
   // ── Devices ────────────────────────────────────────────────────────────
   @Post('devices')
-  @HttpCode(HttpStatus.NO_CONTENT)
+  @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Register / refresh a push token for FCM or APNs.',
     description: [
       '**Audience:** Worker mobile app.',
       '**Powers:** Silent — called on app launch and whenever the platform rotates the push token. ',
       'Drives delivery of payment, application-accepted, and loan-status push notifications.',
+      '',
+      '**Idempotency:** server-side UPSERT keyed on `(worker_id, device_id)`. Safe to call repeatedly ',
+      'with the same `device_id`; only the `push_token` / `app_version` / `platform` fields are refreshed.',
+    ].join('\n\n'),
+  })
+  @ApiResponse({ status: 201, type: RegisterDeviceResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'VALIDATION_FAILED' })
+  registerDevice(
+    @CurrentWorker() me: AuthedWorker,
+    @Body() body: RegisterDeviceDto,
+  ): Promise<RegisterDeviceResponseDto> {
+    return this.me.registerDevice(me.workerId, body);
+  }
+
+  @Delete('devices/:device_id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Unregister a push device. Best-effort.',
+    description: [
+      '**Audience:** Worker mobile app.',
+      '**Powers:** "Sign out" — the mobile fires this before clearing local creds so the next ',
+      'sign-in on the same device (potentially a different worker) doesn\'t inherit the previous ',
+      'worker\'s FCM row. Server-side token pruning on FCM `UNREGISTERED` is a backstop, not a ',
+      'replacement, for this call.',
+      '',
+      '**Behavior:** 204 even if the row is already gone — never errors so the logout flow ',
+      'can\'t hang on a stale device row.',
     ].join('\n\n'),
   })
   @ApiResponse({ status: 204 })
-  async registerDevice(
+  async unregisterDevice(
     @CurrentWorker() me: AuthedWorker,
-    @Body() body: RegisterDeviceDto,
+    @Param('device_id') deviceId: string,
   ) {
-    await this.me.registerDevice(me.workerId, body);
+    await this.me.unregisterDevice(me.workerId, deviceId);
   }
 
   // ── Notifications ──────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { ID_PREFIXES, newId } from '../../../common/utils/ids';
+import { PushNotificationService } from '../../messaging/push-notification.service';
 
 /** §11.4 — if scheduledStartAt + 15min has passed without a clock_in, flag late. */
 const LATE_THRESHOLD_MS = 15 * 60_000;
@@ -16,7 +17,10 @@ const EMPLOYER_DASHBOARD_ROLES = [
 export class FlagLateWorkersCron {
   private readonly logger = new Logger(FlagLateWorkersCron.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly push: PushNotificationService,
+  ) {}
 
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'flag-late-workers' })
   async run(): Promise<void> {
@@ -55,6 +59,7 @@ export class FlagLateWorkersCron {
     const now = new Date();
     for (const job of candidates) {
       if (!job.assignedWorker) continue;
+      const workerNotificationId = newId(ID_PREFIXES.notification);
       try {
         await this.prisma.$transaction(async (tx) => {
           await tx.jobEvent.create({
@@ -76,13 +81,13 @@ export class FlagLateWorkersCron {
           // Worker mobile nudge — "your job started, please clock in."
           await tx.notification.create({
             data: {
-              id: newId(ID_PREFIXES.notification),
+              id: workerNotificationId,
               workerId: job.assignedWorker!.id,
               kind: 'worker_late',
               title: 'You\'re running late',
               body: `"${job.title}" started ${Math.round(LATE_THRESHOLD_MS / 60_000)} min ago — clock in if you\'re on site.`,
               timestamp: now,
-              deeplink: `/jobs/${job.id}`,
+              deeplink: `/jobs/${job.id}/clock-in`,
             },
           });
 
@@ -103,6 +108,8 @@ export class FlagLateWorkersCron {
             }
           }
         });
+        // Post-commit push — best-effort, never re-throws.
+        void this.push.sendForNotificationRow(workerNotificationId);
       } catch (err) {
         this.logger.error(
           `[flag-late-workers] failed for ${job.id}: ${err instanceof Error ? err.message : String(err)}`,

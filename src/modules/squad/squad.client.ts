@@ -52,6 +52,13 @@ export interface SquadSmsInput {
   to: string;
   /** SMS body. Keep ≤ 160 chars to avoid concatenation cost. */
   message: string;
+  /**
+   * Delivery channel. `'sms'` (default) hits the regular SMS endpoint;
+   * `'whatsapp'` routes via the same wire shape with `channel: 'whatsapp'` —
+   * Squad and Termii both accept this shape. Stub mode logs which channel
+   * was requested so dev exercises the routing.
+   */
+  channel?: 'sms' | 'whatsapp';
 }
 
 export interface SquadSmsOutcome {
@@ -294,14 +301,15 @@ export class SquadClient {
    * to the BE console when `otp.debugExpose` is set, so dev signup keeps working.
    */
   async sendSms(input: SquadSmsInput): Promise<SquadSmsOutcome> {
+    const channel = input.channel ?? 'sms';
     if (this.isStub()) {
       this.logger.log(
-        `[squad-stub] sms to=${input.to} body="${input.message.slice(0, 60)}${input.message.length > 60 ? '…' : ''}"`,
+        `[squad-stub] ${channel} to=${input.to} body="${input.message.slice(0, 60)}${input.message.length > 60 ? '…' : ''}"`,
       );
       return {
         accepted: true,
-        providerReference: `stub_sms_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
-        message: 'Stubbed — no SMS dispatched.',
+        providerReference: `stub_${channel}_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+        message: `Stubbed — no ${channel} dispatched.`,
       };
     }
     const senderId =
@@ -315,18 +323,19 @@ export class SquadClient {
         to: input.to,
         message: input.message,
         sender_id: senderId,
+        ...(channel === 'whatsapp' ? { channel: 'whatsapp' } : {}),
       });
       const ok = res.status >= 200 && res.status < 300;
       const ref = pickString(res.data ?? {}, ['message_id', 'reference', 'id']);
       if (!ok) {
         this.logger.warn(
-          `[squad] sms send returned ${res.status} ${res.message} for to=${input.to}`,
+          `[squad] ${channel} send returned ${res.status} ${res.message} for to=${input.to}`,
         );
       }
       return { accepted: ok, providerReference: ref, message: res.message };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.logger.error(`[squad] sms send failed for to=${input.to}: ${msg}`);
+      this.logger.error(`[squad] ${channel} send failed for to=${input.to}: ${msg}`);
       return { accepted: false, providerReference: null, message: msg };
     }
   }
