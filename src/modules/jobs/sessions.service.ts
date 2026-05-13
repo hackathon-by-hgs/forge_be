@@ -5,6 +5,7 @@ import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { haversineMeters } from '../../common/utils/geo';
 import { JobCompletionService } from '../lifecycle/job-completion.service';
+import { StreamPublisher } from '../stream/stream.publisher';
 import { ClockInDto, ClockOutDto } from './dto/session.dto';
 import { mapSession } from './jobs.mapper';
 
@@ -26,6 +27,7 @@ export class SessionsService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly completion: JobCompletionService,
+    private readonly stream: StreamPublisher,
   ) {}
 
   async clockIn(workerId: string, body: ClockInDto) {
@@ -152,7 +154,12 @@ export class SessionsService {
     }
 
     const upload = await this.prisma.upload.findUnique({ where: { id: body.proof_upload_id } });
-    if (!upload || upload.workerId !== workerId || upload.purpose !== 'clock_out_proof') {
+    if (
+      !upload
+      || upload.workerId !== workerId
+      || upload.purpose !== 'clock_out_proof'
+      || upload.expiresAt.getTime() <= Date.now()
+    ) {
       throw new AppError(422, 'UPLOAD_NOT_FOUND', 'Proof upload not found or expired.');
     }
 
@@ -257,16 +264,39 @@ export class SessionsService {
 
       // 7) Hand off to the shared completion path — atomically transitions
       //    pending_verification → completed and fires the auto-debit.
-      await this.completion.completeSession(sessionId, {
+      const outcome = await this.completion.completeSession(sessionId, {
         tx,
         actor: { type: 'worker', id: workerId },
         source: 'clock_out_with_proof',
       });
 
-      // Return the fully-completed session for the response shape.
-      return tx.workSession.findUniqueOrThrow({ where: { id: sessionId } });
+      // Return the fully-completed session + outcome for the response shape
+      // and post-commit SSE fan-out.
+      const session = await tx.workSession.findUniqueOrThrow({ where: { id: sessionId } });
+      return { session, outcome };
     });
 
-    return { session: mapSession(completed) };
+    // Post-commit: fan the dashboard signals out over SSE so the employer
+    // active-map / Overview / Payments surfaces refresh without polling.
+    this.stream.publish({
+      scope: { kind: 'employer', id: s.application.job.employerId },
+      event: 'worker.clock_event',
+      data: {
+        sessionId,
+        jobId: s.application.jobId,
+        workerId,
+        kind: 'clock_out',
+        verified,
+        distanceMeters: distance,
+        accuracyMeters: body.accuracy_meters,
+        at: clockOutAt.toISOString(),
+        proofPhotoUrl: upload.url,
+      },
+    });
+    if (completed.outcome) {
+      this.completion.publishLifecycle(completed.outcome);
+    }
+
+    return { session: mapSession(completed.session) };
   }
 }

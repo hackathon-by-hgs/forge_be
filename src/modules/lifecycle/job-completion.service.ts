@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
+import { StreamPublisher } from '../stream/stream.publisher';
 
 /** Internal — what each `worker_late` notification touches in the DB. */
 const EMPLOYER_BUSINESS_ROLES = [
@@ -21,8 +22,11 @@ export interface CompletionContext {
 
 export interface CompletionOutcome {
   jobId: string;
+  employerId: string;
   workerId: string;
   amountNaira: number;
+  /** Transaction row id created for this completion (`txn_…`). */
+  transactionId: string;
   /** `succeeded` when the employer wallet covered it; `pending` when not (or
    *  when payouts are paused). Worker wallet is only credited on `succeeded`. */
   paymentStatus: 'succeeded' | 'pending';
@@ -48,7 +52,10 @@ export interface CompletionOutcome {
 export class JobCompletionService {
   private readonly logger = new Logger(JobCompletionService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly stream: StreamPublisher,
+  ) {}
 
   /**
    * Complete a session that is currently `in_progress` or `pending_verification`.
@@ -66,11 +73,42 @@ export class JobCompletionService {
       this.runCompletion(tx, sessionId, ctx);
 
     if (ctx.tx) {
-      // Caller owns the transaction (clock-out path).
+      // Caller owns the transaction (clock-out path). Caller is also
+      // responsible for SSE emissions once their transaction commits.
       return run(ctx.tx);
     }
-    // Cron path — start our own transaction.
-    return this.prisma.$transaction(run);
+    // Cron path — start our own transaction and emit the dashboard signals
+    // ourselves once it commits.
+    const outcome = await this.prisma.$transaction(run);
+    if (outcome) this.publishLifecycle(outcome);
+    return outcome;
+  }
+
+  /**
+   * Fan out the post-completion SSE events to the employer dashboard. Safe to
+   * call from either caller (clock-out or cron) once their transaction has
+   * committed — payloads match the contract documented in [[FE_PHASE4_CLOSEOUT]].
+   */
+  publishLifecycle(outcome: CompletionOutcome): void {
+    this.stream.publish({
+      scope: { kind: 'employer', id: outcome.employerId },
+      event: 'job.lifecycle_changed',
+      data: {
+        jobId: outcome.jobId,
+        status: 'completed',
+        workerId: outcome.workerId,
+      },
+    });
+    this.stream.publish({
+      scope: { kind: 'employer', id: outcome.employerId },
+      event: 'transaction.updated',
+      data: {
+        transactionId: outcome.transactionId,
+        status: outcome.paymentStatus,
+        amountNaira: outcome.amountNaira,
+        source: 'job_completion',
+      },
+    });
   }
 
   // ── Internal ─────────────────────────────────────────────────────────────
@@ -343,8 +381,10 @@ export class JobCompletionService {
 
     return {
       jobId: job.id,
+      employerId: employer.id,
       workerId: worker.id,
       amountNaira: amount,
+      transactionId,
       paymentStatus,
       pendingReason,
       loanRepaymentNaira,
