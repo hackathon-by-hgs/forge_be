@@ -238,10 +238,17 @@ export class AuthService {
       const upload = await this.prisma.upload.findUnique({
         where: { id: body.photo_upload_id },
       });
+      // Signup accepts either purpose: `liveness_selfie` is the AI-verified
+      // selfie minted by `POST /uploads/liveness` (the signup-only path);
+      // `worker_avatar` is the dumb-upload route some clients use when the
+      // liveness step is bypassed in dev. Edit-profile post-signup stays
+      // strict on `worker_avatar` in `me.service.ts`.
       if (
         !upload ||
         upload.workerId !== workerId ||
-        upload.purpose !== 'worker_avatar'
+        (upload.purpose !== 'worker_avatar' &&
+          upload.purpose !== 'liveness_selfie') ||
+        upload.expiresAt.getTime() <= Date.now()
       ) {
         throw new AppError(
           422,
