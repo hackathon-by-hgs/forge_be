@@ -55,6 +55,13 @@ export class SessionLocationDto {
   lng!: number;
 }
 
+export enum WorkSessionVerificationState {
+  AutoReview = 'auto_review',
+  EmployerConfirmed = 'employer_confirmed',
+  AutoReleased = 'auto_released',
+  Disputed = 'disputed',
+}
+
 export class WorkSessionDto {
   @ApiProperty({ example: 'ses_4b9c1f' })
   id!: string;
@@ -91,6 +98,34 @@ export class WorkSessionDto {
 
   @ApiProperty({ nullable: true })
   proof_photo_url!: string | null;
+
+  @ApiProperty({
+    enum: WorkSessionVerificationState,
+    example: WorkSessionVerificationState.AutoReview,
+    description: [
+      '§11.7 employer-signed payouts state machine.',
+      '`auto_review` — clock-out passed AI checks; sitting in the employer review hold.',
+      '`employer_confirmed` — employer hit Confirm; payment disbursed.',
+      '`auto_released` — review window expired with no employer action; payment disbursed.',
+      '`disputed` — employer raised a dispute; funds frozen pending ops resolution.',
+    ].join(' '),
+  })
+  verification_state!: WorkSessionVerificationState;
+
+  @ApiProperty({
+    nullable: true,
+    description:
+      'Wall-clock cutoff after which the auto-release cron disburses the pending amount. Null once terminal (confirmed / released / disputed).',
+    example: '2026-05-09T17:02:00Z',
+  })
+  hold_release_at!: string | null;
+
+  @ApiProperty({
+    nullable: true,
+    description:
+      'When the employer acted (confirm or dispute). Null while still in `auto_review` or once auto-released.',
+  })
+  employer_reviewed_at!: string | null;
 }
 
 export class WorkSessionResponseDto {

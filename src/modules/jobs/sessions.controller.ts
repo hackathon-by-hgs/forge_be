@@ -90,25 +90,33 @@ export class SessionsController {
   }
 
   @Post(':id/clock-out')
-  @HttpCode(HttpStatus.OK)
+  @HttpCode(HttpStatus.ACCEPTED)
   @ApiIdempotencyKey()
   @ApiOperation({
-    summary: 'Clock out. Triggers Squad disbursement and (if applicable) loan deduction.',
+    summary: 'Clock out. Enters the §11.7 employer-review hold.',
     description: [
       '**Audience:** Worker mobile app.',
       '**Powers:** "Clock out" flow — requires a photo proof `upload_id` produced by `POST /uploads` ',
       'with `purpose=clock_out_proof`.',
-      '**Behavior:** Transitions job to `pending_verification`, then `completed` after proof verification or 30-min ',
-      'timeout (BACKEND_BRIEF §11.5). Auto-payment is queued on completion (§11.6) — Squad transfer with same ',
-      'idempotency. Returns 202 if the disbursement is queued asynchronously, 200 if it settled synchronously. ',
-      'Outside-geofence clock-outs return 422 (`OUTSIDE_GEOFENCE`).',
+      '**Behavior:** Server runs the existing photo + GPS AI checks. If they pass, the session moves to ',
+      '`pending_verification` with `verification_state = "auto_review"` and `hold_release_at = NOW + 2h` ',
+      '(Phase 1 — flat hold for everyone; Phase 2 is the tier-aware adaptive hold from §6 of the spec).',
       '',
-      '**Dashboard impact:** Emits `worker_clocked_out`, `photo_proof_uploaded`, `job_completed`, and ',
-      '`payment_initiated` SSE events consumed by the employer Overview live-map, activity feed, and Payments page.',
+      'Disbursement does NOT happen at clock-out anymore. Three terminal paths drive completion:',
+      '1. Employer hits `POST /v1/employer/work-sessions/{id}/confirm` → `employer_confirmed` + immediate disbursement.',
+      '2. Employer hits `POST /v1/employer/work-sessions/{id}/dispute` → `disputed`, funds frozen for ops review.',
+      '3. The 60-second `auto-release-cron` fires at `hold_release_at` → `auto_released` + disbursement.',
+      '',
+      'Returns **202 Accepted** when held (the Phase 1 default for every session). Phase 2 may return 200 ',
+      'for tier-0 (zero-hold) workers, but the response body is otherwise identical.',
+      '',
+      '**Dashboard impact:** Emits `worker.clock_event` (clock-out captured), `session.pending_review` ',
+      "(new — refreshes the dashboard's review queue). The `job.lifecycle_changed` + `transaction.updated` ",
+      'events now fire from the confirm / dispute / auto-release path, not from clock-out itself.',
     ].join('\n\n'),
   })
-  @ApiResponse({ status: 200, type: WorkSessionResponseDto })
-  @ApiResponse({ status: 202, type: WorkSessionResponseDto, description: 'Disbursement queued.' })
+  @ApiResponse({ status: 200, type: WorkSessionResponseDto, description: 'Settled synchronously (Phase 2 zero-hold workers only).' })
+  @ApiResponse({ status: 202, type: WorkSessionResponseDto, description: 'Held for employer review (default).' })
   @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'INVALID_STATE' })
   @ApiResponse({ status: 422, type: ErrorResponseDto, description: 'OUTSIDE_GEOFENCE | UPLOAD_NOT_FOUND | PROOF_REJECTED' })
   @ApiResponse({ status: 502, type: ErrorResponseDto, description: 'PAYMENT_PROVIDER_UNAVAILABLE' })
@@ -120,7 +128,7 @@ export class SessionsController {
   ) {
     const r = await this.idem.run(
       { workerId: me.workerId, key, method: 'POST', path: `/sessions/${id}/clock-out`, bodyForHash: body },
-      async () => ({ status: 200, body: await this.sessions.clockOut(me.workerId, id, body) }),
+      async () => ({ status: 202, body: await this.sessions.clockOut(me.workerId, id, body) }),
     );
     return r.body;
   }

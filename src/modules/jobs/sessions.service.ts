@@ -6,6 +6,7 @@ import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { haversineMeters } from '../../common/utils/geo';
 import { JobCompletionService } from '../lifecycle/job-completion.service';
 import { StreamPublisher } from '../stream/stream.publisher';
+import { PushNotificationService } from '../messaging/push-notification.service';
 import { ClockInDto, ClockOutDto } from './dto/session.dto';
 import { mapSession } from './jobs.mapper';
 
@@ -19,6 +20,11 @@ const VERIFICATION_ACCURACY_M = 30;
  *  governs whether the recorded event counts as `verified` for the dashboard. */
 const CLOCK_IN_ACCURACY_BLOCK_M = 50;
 
+/** §11.7 — flat hold window for Phase 1 (every session, regardless of risk).
+ *  Phase 2 layers in adaptive holds per the spec's tier table; until then
+ *  this default is what `hold_release_at` is set to at clock-out. */
+const DEFAULT_HOLD_MINUTES = 120;
+
 @Injectable()
 export class SessionsService {
   private readonly logger = new Logger(SessionsService.name);
@@ -28,6 +34,7 @@ export class SessionsService {
     private readonly config: ConfigService,
     private readonly completion: JobCompletionService,
     private readonly stream: StreamPublisher,
+    private readonly push: PushNotificationService,
   ) {}
 
   async clockIn(workerId: string, body: ClockInDto) {
@@ -179,7 +186,14 @@ export class SessionsService {
     const clockOutAt = new Date();
     const verified = distance <= VERIFICATION_RADIUS_M && body.accuracy_meters <= VERIFICATION_ACCURACY_M;
 
-    const completed = await this.prisma.$transaction(async (tx) => {
+    // §11.7 — Phase 1 ships a flat hold for every session. Phase 2 will swap
+    // this for a tier-aware `hold_minutes(P(dispute))` lookup; the mobile
+    // already reads whatever `hold_release_at` the server picks.
+    const holdMinutes = DEFAULT_HOLD_MINUTES;
+    const holdReleaseAt = new Date(clockOutAt.getTime() + holdMinutes * 60_000);
+    const workerNotificationId = newId(ID_PREFIXES.notification);
+
+    const result = await this.prisma.$transaction(async (tx) => {
       // 1) Mark the upload promoted so the orphan-upload janitor leaves it alone.
       await tx.upload.update({ where: { id: upload.id }, data: { promoted: true } });
 
@@ -213,9 +227,10 @@ export class SessionsService {
         },
       });
 
-      // 4) Update the session with the clock-out particulars. JobCompletionService
-      //    will flip status → completed after the transient pending_verification.
-      await tx.workSession.update({
+      // 4) Update the session with the clock-out particulars AND the §11.7
+      //    hold window. Completion + disbursement now happens at
+      //    `holdReleaseAt` (auto-release-cron) OR when the employer confirms.
+      const session = await tx.workSession.update({
         where: { id: sessionId },
         data: {
           clockOutAt,
@@ -223,10 +238,13 @@ export class SessionsService {
           clockOutLng: body.lng,
           proofPhotoUrl: upload.url,
           workerNote: body.worker_note ?? null,
+          verificationState: 'auto_review',
+          holdReleaseAt,
         },
       });
 
-      // 5) State machine — §11.5 transient: in_progress → pending_verification.
+      // 5) Application + job park at `pending_verification`. The completion
+      //    path (cron or employer confirm) flips them to `completed`.
       await tx.job.update({
         where: { id: s.application.jobId },
         data: { status: 'pending_verification' },
@@ -262,24 +280,54 @@ export class SessionsService {
         ],
       });
 
-      // 7) Hand off to the shared completion path — atomically transitions
-      //    pending_verification → completed and fires the auto-debit.
-      const outcome = await this.completion.completeSession(sessionId, {
-        tx,
-        actor: { type: 'worker', id: workerId },
-        source: 'clock_out_with_proof',
+      // 7) Worker in-app notification — "Your work is being verified". The
+      //    employer-side UserNotification + FCM happen post-commit alongside
+      //    the SSE fan-out.
+      await tx.notification.create({
+        data: {
+          id: workerNotificationId,
+          workerId,
+          kind: 'payment_held_for_review',
+          title: 'Your work is being verified',
+          body: `₦${s.payAmountPending.toLocaleString('en-NG')} lands automatically in ${holdMinutes < 60 ? `${holdMinutes}m` : `${Math.round(holdMinutes / 60)}h`} if all looks good.`,
+          timestamp: clockOutAt,
+          deeplink: `/jobs/${s.application.jobId}/clock-out/pending`,
+        },
       });
 
-      // Return the fully-completed session + outcome for the response shape
-      // and post-commit SSE fan-out.
-      const session = await tx.workSession.findUniqueOrThrow({ where: { id: sessionId } });
-      return { session, outcome };
+      // 8) Employer dashboard notification — bell + "needs review" queue.
+      //    We fan out to every business user with a review-capable role.
+      const reviewers = await tx.user.findMany({
+        where: {
+          employerId: s.application.job.employerId,
+          role: {
+            in: ['business_owner', 'business_admin', 'business_hiring_manager'],
+          },
+        },
+        select: { id: true },
+      });
+      for (const r of reviewers) {
+        await tx.userNotification.create({
+          data: {
+            id: newId(ID_PREFIXES.userNotification),
+            recipientUserId: r.id,
+            kind: 'clock_out_pending_review',
+            title: `Worker clocked out — ₦${s.payAmountPending.toLocaleString('en-NG')}`,
+            detail: `Review before auto-release at ${holdReleaseAt.toISOString()}.`,
+            href: `/work-sessions/${sessionId}`,
+            occurredAt: clockOutAt,
+          },
+        });
+      }
+
+      return session;
     });
 
-    // Post-commit: fan the dashboard signals out over SSE so the employer
-    // active-map / Overview / Payments surfaces refresh without polling.
+    // Post-commit fan-out. None of these block the response; downstream
+    // signals are best-effort, the auto-release cron is the source of truth.
+    const employerId = s.application.job.employerId;
     this.stream.publish({
-      scope: { kind: 'employer', id: s.application.job.employerId },
+      scope: { kind: 'employer', id: employerId },
       event: 'worker.clock_event',
       data: {
         sessionId,
@@ -293,10 +341,20 @@ export class SessionsService {
         proofPhotoUrl: upload.url,
       },
     });
-    if (completed.outcome) {
-      this.completion.publishLifecycle(completed.outcome);
-    }
+    this.stream.publish({
+      scope: { kind: 'employer', id: employerId },
+      event: 'session.pending_review',
+      data: {
+        sessionId,
+        jobId: s.application.jobId,
+        workerId,
+        payAmountPendingNaira: result.payAmountPending,
+        holdReleaseAt: holdReleaseAt.toISOString(),
+        proofPhotoUrl: upload.url,
+      },
+    });
+    void this.push.sendForNotificationRow(workerNotificationId);
 
-    return { session: mapSession(completed.session) };
+    return { session: mapSession(result) };
   }
 }

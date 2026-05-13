@@ -21,6 +21,10 @@ export type PushKind =
   | 'payment_processed'
   | 'payment_received'
   | 'payment_pending'
+  /** §11.7 — clock-out passed AI; sits in the 2h employer-review hold. */
+  | 'payment_held_for_review'
+  /** §11.7 — employer hit Dispute. Funds frozen, ops review pending. */
+  | 'payment_disputed'
   | 'loan_approved'
   | 'loan_rejected'
   | 'loan_disbursed'
@@ -46,6 +50,8 @@ const KIND_CHANNEL: Record<PushKind, string> = {
   payment_processed: FORGE_PAYMENTS_CHANNEL,
   payment_received: FORGE_PAYMENTS_CHANNEL,
   payment_pending: FORGE_PAYMENTS_CHANNEL,
+  payment_held_for_review: FORGE_PAYMENTS_CHANNEL,
+  payment_disputed: FORGE_PAYMENTS_CHANNEL,
   loan_approved: FORGE_PAYMENTS_CHANNEL,
   loan_disbursed: FORGE_PAYMENTS_CHANNEL,
   loan_repayment_made: FORGE_PAYMENTS_CHANNEL,

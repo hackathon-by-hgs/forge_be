@@ -38,6 +38,12 @@ export type StreamEventName =
   | 'worker.clock_event'
   | 'transaction.updated'
   | 'score.recomputed'
+  /** §11.7 — a worker just clocked out and the session is in the 2h
+   *  employer-review hold. Dashboard invalidates the "pending review" queue. */
+  | 'session.pending_review'
+  /** §11.7 — a held session moved to a terminal state (confirmed / disputed
+   *  / auto-released). Dashboard invalidates the same queue + payments. */
+  | 'session.review_resolved'
   | 'heartbeat';
 
 export interface StreamEvent {

@@ -18,6 +18,7 @@ import { EmployersModule } from './modules/employers/employers.module';
 import { DashboardAuthModule } from './modules/dashboard-auth/dashboard-auth.module';
 import { EmployerModule } from './modules/employer/employer.module';
 import { EmployerJobsModule } from './modules/employer-jobs/employer-jobs.module';
+import { EmployerWorkSessionsModule } from './modules/employer-work-sessions/employer-work-sessions.module';
 import { EmployerPaymentsModule } from './modules/employer-payments/employer-payments.module';
 import { BankModule } from './modules/bank/bank.module';
 import { SquadModule } from './modules/squad/squad.module';
@@ -52,6 +53,7 @@ import { AiModule } from './modules/ai/ai.module';
     DashboardAuthModule,
     EmployerModule,
     EmployerJobsModule,
+    EmployerWorkSessionsModule,
     EmployerWorkersModule,
     EmployerCreditModule,
     EmployerAnalyticsModule,

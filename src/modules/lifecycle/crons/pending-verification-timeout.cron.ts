@@ -27,6 +27,12 @@ export class PendingVerificationTimeoutCron {
       where: {
         clockOutAt: { lte: cutoff },
         application: { status: 'pending_verification' },
+        // §11.7 — `auto_review` sessions are owned by the employer-review
+        // hold and the new `auto-release-cron`. This legacy 30-min cron is
+        // a backstop for sessions that landed in `pending_verification`
+        // WITHOUT entering the review flow (e.g. a pre-§11.7 row, or a
+        // future non-mobile clock-out path).
+        NOT: { verificationState: 'auto_review' },
       },
       select: { id: true, applicationId: true },
     });

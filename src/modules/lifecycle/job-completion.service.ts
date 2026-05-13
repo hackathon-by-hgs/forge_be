@@ -15,10 +15,21 @@ const EMPLOYER_BUSINESS_ROLES = [
 export interface CompletionContext {
   /** Optional — provide when the caller is already inside a `$transaction`. */
   tx?: Prisma.TransactionClient;
-  /** Who initiated the completion. `system` for the timeout cron. */
-  actor: { type: 'worker'; id: string } | { type: 'system' };
+  /** Who initiated the completion.
+   *  - `worker` — legacy path (pre-§11.7 clock-out-with-proof).
+   *  - `user` — dashboard employer hitting "Confirm" on the review screen.
+   *  - `system` — the auto-release / timeout crons.
+   */
+  actor:
+    | { type: 'worker'; id: string }
+    | { type: 'user'; id: string }
+    | { type: 'system' };
   /** Source of the completion. Tagged into JobEvents for the timeline. */
-  source: 'clock_out_with_proof' | 'pending_verification_timeout';
+  source:
+    | 'clock_out_with_proof'
+    | 'pending_verification_timeout'
+    | 'employer_confirmed'
+    | 'auto_released';
 }
 
 export interface CompletionOutcome {
@@ -310,9 +321,14 @@ export class JobCompletionService {
     });
 
     // 5) JobEvents — timeline + audit trail. Source tag distinguishes the
-    //    clock-out-with-proof path from the timeout cron path.
-    const actorId = ctx.actor.type === 'worker' ? ctx.actor.id : 'system';
-    const actorType = ctx.actor.type === 'worker' ? 'worker' : 'system';
+    //    clock-out-with-proof, employer-confirmed, and timeout/auto-release paths.
+    const actorId = ctx.actor.type === 'system' ? 'system' : ctx.actor.id;
+    const actorType =
+      ctx.actor.type === 'worker'
+        ? 'worker'
+        : ctx.actor.type === 'user'
+          ? 'employer'
+          : 'system';
     await tx.jobEvent.createMany({
       data: [
         {

@@ -3,6 +3,7 @@ import { JobCompletionService } from './job-completion.service';
 import { TeamFirstFlipCron } from './crons/team-first-flip.cron';
 import { FlagLateWorkersCron } from './crons/flag-late-workers.cron';
 import { PendingVerificationTimeoutCron } from './crons/pending-verification-timeout.cron';
+import { AutoReleaseCron } from './crons/auto-release.cron';
 
 /**
  * Phase 2b — hire→clock-out lifecycle. Three scheduled jobs (`@nestjs/schedule`)
@@ -19,6 +20,7 @@ import { PendingVerificationTimeoutCron } from './crons/pending-verification-tim
     TeamFirstFlipCron,
     FlagLateWorkersCron,
     PendingVerificationTimeoutCron,
+    AutoReleaseCron,
   ],
   exports: [JobCompletionService],
 })

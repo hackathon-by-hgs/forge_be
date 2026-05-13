@@ -1,6 +1,7 @@
 import { Employer, Job, JobApplication, WorkSession } from '@prisma/client';
 import { JobType } from '../../common/enums/primary-skill.enum';
 import { drivingMinutes, haversineMeters, walkingMinutes } from '../../common/utils/geo';
+import { WorkSessionVerificationState } from './dto/session.dto';
 import {
   JobDto,
   JobDetailDto,
@@ -117,6 +118,9 @@ export function mapSession(s: WorkSession) {
     pay_amount_disbursed: s.payAmountDisbursed,
     transaction_id: s.transactionId,
     proof_photo_url: s.proofPhotoUrl,
+    verification_state: s.verificationState as WorkSessionVerificationState,
+    hold_release_at: s.holdReleaseAt?.toISOString() ?? null,
+    employer_reviewed_at: s.employerReviewedAt?.toISOString() ?? null,
   };
 }
 

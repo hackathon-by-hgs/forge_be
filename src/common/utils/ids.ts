@@ -49,4 +49,5 @@ export const ID_PREFIXES = {
   teamInvite: 'tinv',
   teamMember: 'tmem',
   block: 'blk',
+  dispute: 'dis',
 } as const;

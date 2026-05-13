@@ -389,11 +389,43 @@ model WorkSession {
   payAmountDisbursed     Int       @default(0) @map("pay_amount_disbursed")
   transactionId          String?   @map("transaction_id")
   workerNote             String?   @map("worker_note")
+  // §11.7 employer-signed payouts — clock-out enters `auto_review` for a
+  // server-decided hold window (default 2h). `holdReleaseAt` is the wall
+  // clock cutoff the auto-release cron polls; null once terminal.
+  // `employerReviewedAt` stamps the confirm/dispute action.
+  verificationState      String    @default("auto_review") @map("verification_state")
+  holdReleaseAt          DateTime? @map("hold_release_at")
+  employerReviewedAt     DateTime? @map("employer_reviewed_at")
   createdAt              DateTime  @default(now()) @map("created_at")
 
   application JobApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  disputes    Dispute[]
 
+  @@index([verificationState, holdReleaseAt])
   @@map("work_sessions")
+}
+
+/// §11.7 — employer-raised dispute over a clock-out. Resolution is
+/// ops-driven, not employer-driven. One row per dispute; an `open`
+/// dispute holds funds in the employer wallet until resolved.
+model Dispute {
+  id             String    @id
+  workSessionId  String    @map("work_session_id")
+  openedBy       String    @map("opened_by") // employerId
+  reason         String
+  description    String?
+  evidenceUrls   String[]  @map("evidence_urls")
+  status         String    @default("open")
+  openedAt       DateTime  @default(now()) @map("opened_at")
+  resolvedAt     DateTime? @map("resolved_at")
+  resolvedBy     String?   @map("resolved_by") // ops user id
+  resolutionNote String?   @map("resolution_note")
+
+  workSession WorkSession @relation(fields: [workSessionId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([workSessionId])
+  @@map("disputes")
 }
 
 model ClockEvent {
