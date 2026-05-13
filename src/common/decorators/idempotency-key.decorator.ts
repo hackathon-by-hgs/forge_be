@@ -18,8 +18,8 @@ export const IdempotencyKey = createParamDecorator(
       return undefined;
     }
 
-    if (!/^[a-zA-Z0-9-]{8,128}$/.test(value)) {
-      throw new AppError(400, 'IDEMPOTENCY_KEY_INVALID', 'Idempotency-Key must be 8-128 chars (UUID v4 recommended).');
+    if (!/^[a-zA-Z0-9_:.-]{8,128}$/.test(value)) {
+      throw new AppError(400, 'IDEMPOTENCY_KEY_INVALID', 'Idempotency-Key must be 8-128 chars (UUID v4 or scoped key like `confirm:ses_…:emp_…`).');
     }
     return value;
   },
