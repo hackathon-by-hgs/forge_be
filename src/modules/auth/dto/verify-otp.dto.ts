@@ -1,6 +1,16 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsString, Length, Matches } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsEnum,
+  IsOptional,
+  IsString,
+  Length,
+  Matches,
+  MaxLength,
+} from 'class-validator';
 import { WorkerDto } from '../../me/dto/worker.dto';
+import { DevicePlatform } from './request-otp.dto';
+
+const DEVICE_ID_PATTERN = /^[A-Za-z0-9._:-]{6,128}$/;
 
 export class VerifyOtpDto {
   @ApiProperty({ example: 'chl_8a3f2c1d' })
@@ -12,6 +22,29 @@ export class VerifyOtpDto {
   @Length(6, 6)
   @Matches(/^\d{6}$/, { message: 'code must be 6 digits' })
   code!: string;
+
+  // Optional device fields — when all three are present and verify succeeds,
+  // the server upserts a `DeviceToken` row so subsequent fan-out targets
+  // this device. Saves a follow-up `POST /me/devices` round-trip.
+
+  @ApiPropertyOptional({ description: 'FCM push token of the verifying device.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(4096)
+  push_token?: string;
+
+  @ApiPropertyOptional({ example: 'd9b6f1c8-2a4e-4f11-9b5c-6e2d8f0a1234' })
+  @IsOptional()
+  @IsString()
+  @Matches(DEVICE_ID_PATTERN, {
+    message: 'device_id must be 6–128 chars of [A-Za-z0-9._:-]',
+  })
+  device_id?: string;
+
+  @ApiPropertyOptional({ enum: DevicePlatform })
+  @IsOptional()
+  @IsEnum(DevicePlatform)
+  platform?: DevicePlatform;
 }
 
 export class VerifyOtpResponseDto {

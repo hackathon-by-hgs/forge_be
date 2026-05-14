@@ -3,6 +3,7 @@ import type { Rating } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppError } from '../../common/utils/app-error';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
+import { StreamPublisher } from '../stream/stream.publisher';
 import {
   decodeCursor,
   encodeCursor,
@@ -43,7 +44,10 @@ const TAGS_TOP_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 export class RatingsService {
   private readonly logger = new Logger(RatingsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly stream: StreamPublisher,
+  ) {}
 
   // ── Create ─────────────────────────────────────────────────────────────
 
@@ -192,6 +196,34 @@ export class RatingsService {
       return row;
     });
 
+    // Post-commit SSE fan-out. Employer scope when an employer→worker
+    // rating just landed (lets the dashboard clear the inbox row without a
+    // refetch). Worker scope doesn't exist today (workers consume FCM, not
+    // SSE), so worker→employer ratings are visible only on next mobile
+    // refresh — flag a separate FCM trigger if real-time matters there.
+    const subjectEmployerId =
+      authorRole === RatingAuthorRole.Worker
+        ? session.application.job.employerId
+        : null;
+    const targetEmployerId =
+      authorRole === RatingAuthorRole.Employer
+        ? session.application.job.employerId
+        : subjectEmployerId;
+    if (targetEmployerId) {
+      this.stream.publish({
+        scope: { kind: 'employer', id: targetEmployerId },
+        event: 'rating.created',
+        data: {
+          ratingId: created.id,
+          sessionId,
+          authorRole,
+          subjectId,
+          subjectType:
+            authorRole === RatingAuthorRole.Employer ? 'worker' : 'employer',
+        },
+      });
+    }
+
     return this.mapRating(created);
   }
 
@@ -226,7 +258,7 @@ export class RatingsService {
         },
       },
       orderBy: { clockOutAt: 'desc' },
-      take: 50,
+      take: 100,
     });
 
     const items: WorkerPendingRatingItemDto[] = rows
@@ -268,7 +300,7 @@ export class RatingsService {
         },
       },
       orderBy: { clockOutAt: 'desc' },
-      take: 50,
+      take: 100,
     });
 
     const items: EmployerPendingRatingItemDto[] = rows
@@ -399,21 +431,26 @@ export class RatingsService {
       },
     });
     let authorName = '';
+    let authorPhotoUrl: string | null = null;
     if (row.authorRole === 'employer') {
       const e = await this.prisma.employer.findUnique({
         where: { id: row.authorId },
-        select: { businessName: true },
+        select: { businessName: true, photoUrl: true },
       });
       authorName = e?.businessName ?? '';
+      authorPhotoUrl = e?.photoUrl ?? null;
     } else {
       const w = await this.prisma.worker.findUnique({
         where: { id: row.authorId },
-        select: { name: true },
+        select: { name: true, photoUrl: true },
       });
       authorName = w?.name ?? '';
+      authorPhotoUrl = w?.photoUrl ?? null;
     }
     return {
       id: row.id,
+      session_id: row.workSessionId,
+      author_role: row.authorRole as RatingAuthorRole,
       stars: row.stars,
       tags: row.tags,
       comment: row.comment,
@@ -422,6 +459,7 @@ export class RatingsService {
         id: row.authorId,
         name: authorName,
         kind: row.authorRole as RatingAuthorRole,
+        photo_url: authorPhotoUrl,
       },
       job: {
         id: session?.application.job.id ?? '',

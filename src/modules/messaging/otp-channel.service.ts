@@ -11,8 +11,21 @@ export type PreferredOtpChannel = 'auto' | OtpChannel;
 export interface PickedChannel {
   channel: OtpChannel;
   hint: string;
-  /** Pre-resolved primary device (push channel only) — saves a second lookup. */
-  device?: { workerId: string; deviceId: string; pushToken: string };
+  /**
+   * Pre-resolved push target (push channel only).
+   * - `workerId: string` — token came from `getPrimaryDevice` lookup. Failures
+   *   prune the row.
+   * - `workerId: null` — token came from a request-body hint (new device or
+   *   signup). Failures don't touch the DeviceToken table.
+   */
+  device?: { workerId: string | null; deviceId: string; pushToken: string };
+}
+
+/** Mobile-supplied device hint passed through `POST /auth/otp/request` body. */
+export interface OtpDeviceHint {
+  deviceId: string;
+  pushToken: string;
+  platform: 'ios' | 'android';
 }
 
 const HINT_BY_CHANNEL: Record<OtpChannel, string> = {
@@ -60,12 +73,42 @@ export class OtpChannelService {
   async pickChannel(
     phone: string,
     preferred: PreferredOtpChannel | undefined,
+    deviceHint?: OtpDeviceHint,
   ): Promise<PickedChannel> {
     const pref: PreferredOtpChannel = preferred ?? 'auto';
-    const worker = await this.prisma.worker.findUnique({ where: { phoneNumber: phone } });
-    const device = worker ? await this.push.getPrimaryDevice(worker.id) : null;
     const whatsappEnabled = this.config.get<boolean>('otpChannels.whatsappEnabled') ?? true;
     const pushEnabled = this.config.get<boolean>('otpChannels.pushEnabled') ?? true;
+
+    // Explicit non-push picks short-circuit BEFORE the hint is honoured.
+    // If the user typed "send via SMS", we send via SMS even if the mobile
+    // also supplied a push token (e.g. support-tooling path).
+    if (pref === 'whatsapp') {
+      return { channel: 'whatsapp', hint: HINT_BY_CHANNEL.whatsapp };
+    }
+    if (pref === 'sms') {
+      return { channel: 'sms', hint: HINT_BY_CHANNEL.sms };
+    }
+
+    const worker = await this.prisma.worker.findUnique({ where: { phoneNumber: phone } });
+
+    // Device hint wins over the registered-DeviceToken lookup whenever push
+    // is on the table. Solves the handoff bug: the new phone tells the
+    // server where to send the OTP, instead of the server picking a stale
+    // entry from the previous device. workerId is nullable so the signup
+    // path (no worker yet) can still target the requesting device.
+    if (deviceHint && pushEnabled) {
+      return {
+        channel: 'push',
+        hint: HINT_BY_CHANNEL.push,
+        device: {
+          workerId: worker?.id ?? null,
+          deviceId: deviceHint.deviceId,
+          pushToken: deviceHint.pushToken,
+        },
+      };
+    }
+
+    const device = worker ? await this.push.getPrimaryDevice(worker.id) : null;
 
     if (pref === 'push') {
       if (!worker || !device || !pushEnabled) {
@@ -80,12 +123,6 @@ export class OtpChannelService {
         hint: HINT_BY_CHANNEL.push,
         device: { workerId: worker.id, deviceId: device.deviceId, pushToken: device.pushToken },
       };
-    }
-    if (pref === 'whatsapp') {
-      return { channel: 'whatsapp', hint: HINT_BY_CHANNEL.whatsapp };
-    }
-    if (pref === 'sms') {
-      return { channel: 'sms', hint: HINT_BY_CHANNEL.sms };
     }
 
     // auto
@@ -123,19 +160,30 @@ export class OtpChannelService {
     const waBody = smsBody; // template body identical for now
 
     if (picked.channel === 'push' && picked.device) {
-      const sent = await this.push.notifyToken(
-        picked.device.workerId,
-        picked.device.deviceId,
-        picked.device.pushToken,
-        {
-          kind: 'auth_otp',
-          notificationId: `otp_${challengeId}`,
-          title: 'Your Forge code',
-          body: `${code} — don't share. Tap to log in.`,
-          deeplink: `forge://auth/verify?challenge=${encodeURIComponent(challengeId)}&code=${encodeURIComponent(code)}`,
-          extraData: { challenge_id: challengeId, code },
-        },
-      );
+      const pushInput = {
+        kind: 'auth_otp' as const,
+        notificationId: `otp_${challengeId}`,
+        title: 'Your Forge code',
+        body: `${code} — don't share. Tap to log in.`,
+        deeplink: `forge://auth/verify?challenge=${encodeURIComponent(challengeId)}&code=${encodeURIComponent(code)}`,
+        extraData: { challenge_id: challengeId, code },
+      };
+      // Two paths: registered device (workerId known → prune-on-failure
+      // semantics) vs ephemeral hint from the request body (workerId may
+      // be null for signup, no DB writes either way).
+      const sent =
+        picked.device.workerId !== null
+          ? await this.push.notifyToken(
+              picked.device.workerId,
+              picked.device.deviceId,
+              picked.device.pushToken,
+              pushInput,
+            )
+          : await this.push.notifyEphemeralToken(
+              picked.device.pushToken,
+              pushInput,
+              picked.device.deviceId,
+            );
       if (sent.delivered) {
         return { channel: 'push', hint: HINT_BY_CHANNEL.push };
       }

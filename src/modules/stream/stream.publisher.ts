@@ -67,6 +67,11 @@ export type StreamEventName =
   /** §11 worker withdrawals — broadcast for platform-admin visibility.
    *  Admin dashboard filters on this name. Non-admin subscribers ignore. */
   | 'withdrawal.terminal'
+  /** §27 ratings — fires on rating insert. Employer dashboard uses it to
+   *  clear the worker's row from the pending-ratings inbox without a
+   *  refetch; bank dashboard ignores. Payload carries session/rating ids
+   *  + subject so the FE can target the right query key. */
+  | 'rating.created'
   | 'heartbeat';
 
 export interface StreamEvent {

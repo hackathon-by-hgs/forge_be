@@ -16,6 +16,14 @@ class RatingFromDto {
 
   @ApiProperty({ enum: RatingAuthorRole, example: RatingAuthorRole.Employer })
   kind!: RatingAuthorRole;
+
+  @ApiProperty({
+    nullable: true,
+    example: 'https://cdn.forge.app/workers/wkr_8a3f2c.jpg',
+    description:
+      'Avatar URL of the rater. Worker.photoUrl when authorRole=worker; Employer.photoUrl when authorRole=employer. Null when the subject has no photo on file.',
+  })
+  photo_url!: string | null;
 }
 
 class RatingJobDto {
@@ -29,6 +37,15 @@ class RatingJobDto {
 export class ReceivedRatingDto {
   @ApiProperty({ example: 'rat_4b9c1f' })
   id!: string;
+
+  @ApiProperty({ example: 'ses_4b9c1f' })
+  session_id!: string;
+
+  @ApiProperty({
+    enum: RatingAuthorRole,
+    description: 'Who wrote the rating. Mirror of `from.kind`.',
+  })
+  author_role!: RatingAuthorRole;
 
   @ApiProperty({ minimum: 1, maximum: 5, example: 5 })
   stars!: number;

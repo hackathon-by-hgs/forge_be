@@ -313,6 +313,27 @@ export class PushNotificationService {
     return { delivered: false };
   }
 
+  /**
+   * Send to a push token that ISN'T (yet) tied to a `DeviceToken` row.
+   * Used by the OTP-request path when the mobile sends its own token in the
+   * request body — the worker may not exist (new signup) or may not have
+   * registered this device yet (handoff from another phone). No DB writes,
+   * no pruning — purely ephemeral. Caller falls back to SMS/WhatsApp on
+   * `delivered: false`.
+   */
+  async notifyEphemeralToken(
+    pushToken: string,
+    input: NotifyWorkerInput,
+    deviceId: string,
+  ): Promise<{ delivered: boolean }> {
+    const payload = this.buildPayload(pushToken, input);
+    // `sendWithRetry` only uses workerId/deviceId for log lines, never to
+    // resolve a row. Pass a synthetic worker label so an ops grep on the
+    // log can recognise an OTP send that bypassed the DeviceToken table.
+    const outcome = await this.sendWithRetry(payload, 'ephemeral', deviceId);
+    return { delivered: outcome.ok };
+  }
+
   /** Most-recently-updated device for a worker, or null. */
   async getPrimaryDevice(
     workerId: string,

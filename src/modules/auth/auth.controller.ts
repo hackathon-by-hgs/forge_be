@@ -184,12 +184,19 @@ export class AuthController {
       '**Audience:** Worker mobile app.',
       '**Powers:** "Sign out" in worker app Settings.',
       '**Behavior:** Best-effort — succeeds even if the token is already invalid (returns 204 either way).',
+      '',
+      'Pass `device_id` in the body to also drop the matching `DeviceToken` so future OTP requests',
+      'on this account from another phone don\'t route here. (Belt-and-braces with the canonical',
+      '`DELETE /me/devices/:id` cleanup the mobile fires on sign-out.)',
     ].join('\n\n'),
   })
   @ApiBody({ type: RefreshDto })
   @ApiResponse({ status: 204 })
-  async logout(@Body() body: RefreshDto) {
-    await this.auth.logout(body.refresh_token);
+  async logout(@CurrentWorker() me: AuthedWorker, @Body() body: RefreshDto) {
+    await this.auth.logout(body.refresh_token, {
+      workerId: me.workerId,
+      deviceId: body.device_id,
+    });
   }
 
   @Get('otp/debug/:challengeId')

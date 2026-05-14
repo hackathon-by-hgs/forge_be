@@ -79,7 +79,24 @@ export class AuthService {
     // Pick the channel BEFORE creating the challenge so a forced
     // `preferred_channel=push` with no device returns 422 without leaving a
     // stray OtpChallenge behind.
-    const picked = await this.otpChannel.pickChannel(body.phone, body.preferred_channel);
+    //
+    // Mobile may send a device hint (push_token + device_id + platform) so
+    // a fresh phone can self-target the OTP push without first registering
+    // via `POST /me/devices` — solves the device-handoff bug where the OTP
+    // would otherwise route to the previous phone.
+    const deviceHint =
+      body.push_token && body.device_id && body.platform
+        ? {
+            deviceId: body.device_id,
+            pushToken: body.push_token,
+            platform: body.platform,
+          }
+        : undefined;
+    const picked = await this.otpChannel.pickChannel(
+      body.phone,
+      body.preferred_channel,
+      deviceHint,
+    );
 
     const challenge = await this.prisma.otpChallenge.create({
       data: {
@@ -195,6 +212,7 @@ export class AuthService {
         throw new AppError(404, 'PHONE_NOT_FOUND', 'Account no longer exists.');
       }
       const tokens = await this.issueTokenPair(worker.id);
+      await this.upsertDeviceFromVerify(worker.id, body);
       return {
         ...tokens,
         worker: toWorkerDto(worker),
@@ -214,7 +232,43 @@ export class AuthService {
       },
     });
     const tokens = await this.issueTokenPair(shell.id);
+    await this.upsertDeviceFromVerify(shell.id, body);
     return { ...tokens, worker: null, needs_profile_setup: true };
+  }
+
+  /**
+   * Eagerly register the verifying device so subsequent worker pushes
+   * (payment, application updates, etc.) target THIS phone — closing the
+   * handoff loop that started in `requestOtp`. Saves the mobile a follow-up
+   * `POST /me/devices` round-trip. No-op when the mobile didn't supply the
+   * fields (old client). Best-effort — verify still succeeds if the upsert
+   * blows up.
+   */
+  private async upsertDeviceFromVerify(
+    workerId: string,
+    body: VerifyOtpDto,
+  ): Promise<void> {
+    if (!body.push_token || !body.device_id || !body.platform) return;
+    try {
+      await this.prisma.deviceToken.upsert({
+        where: { workerId_deviceId: { workerId, deviceId: body.device_id } },
+        create: {
+          id: newId(ID_PREFIXES.device),
+          workerId,
+          deviceId: body.device_id,
+          platform: body.platform,
+          pushToken: body.push_token,
+        },
+        update: {
+          platform: body.platform,
+          pushToken: body.push_token,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `[auth] device upsert from verify failed for worker=${workerId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // ── Profile setup (signup completion) ──────────────────────────────────────
@@ -335,11 +389,26 @@ export class AuthService {
   }
 
   // ── Logout ─────────────────────────────────────────────────────────────────
-  async logout(refreshToken: string): Promise<void> {
+  async logout(
+    refreshToken: string,
+    args?: { workerId?: string; deviceId?: string },
+  ): Promise<void> {
     const tokenHash = await this.hashRefresh(refreshToken);
     await this.prisma.refreshToken
       .update({ where: { tokenHash }, data: { usedAt: new Date() } })
       .catch(() => undefined); // best-effort
+
+    // §24 device hygiene — when the mobile signs out it should also drop
+    // the DeviceToken so a later OTP request from a different phone
+    // doesn't route here. The `DELETE /me/devices/:id` cleanup is the
+    // canonical path; this is the safety net for clients that skip it.
+    if (args?.workerId && args?.deviceId) {
+      await this.prisma.deviceToken
+        .deleteMany({
+          where: { workerId: args.workerId, deviceId: args.deviceId },
+        })
+        .catch(() => undefined);
+    }
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
