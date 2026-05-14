@@ -83,6 +83,81 @@ export class EmailService {
     await this.send({ to: args.to, subject, html, text });
   }
 
+  /**
+   * Worker-mobile transactional email — fired by `WithdrawalSettlementService`
+   * after a withdrawal terminal state. Best-effort; if the worker has no
+   * email on file the caller skips this entirely (workers auth via OTP and
+   * email is optional). Routes to the worker-mobile deeplink if rendered in
+   * a webview, else just shows the receipt content inline.
+   */
+  async sendWithdrawalReceipt(args: {
+    to: string;
+    workerName: string;
+    amountNaira: number;
+    bankName: string;
+    accountNumberLast4: string;
+    transactionId: string;
+  }): Promise<void> {
+    const formatted = `₦${args.amountNaira.toLocaleString('en-NG')}`;
+    const subject = `${formatted} sent to ${args.bankName} ****${args.accountNumberLast4}`;
+    const text = `Hi ${args.workerName},\n\nYour withdrawal of ${formatted} to ${args.bankName} ****${args.accountNumberLast4} is on its way.\n\nReference: ${args.transactionId}\n\n— Forge`;
+    const html = this.layout({
+      preview: `${formatted} on its way to ${args.bankName} ****${args.accountNumberLast4}.`,
+      heading: 'Withdrawal sent',
+      body:
+        `<p>Hi ${escapeHtml(args.workerName)},</p>` +
+        `<p>Your withdrawal of <strong>${escapeHtml(formatted)}</strong> to ` +
+        `<strong>${escapeHtml(args.bankName)} ****${escapeHtml(args.accountNumberLast4)}</strong> is on its way.</p>` +
+        `<p style="color:#475569;font-size:13px;">Reference: ${escapeHtml(args.transactionId)}</p>`,
+      ctaLabel: 'Open Forge',
+      ctaUrl: `forge://transactions/${encodeURIComponent(args.transactionId)}`,
+      footer:
+        `Most transfers settle within minutes. If anything looks wrong, reply to this email — we'll resolve it within 24 hours.`,
+    });
+    await this.send({ to: args.to, subject, html, text });
+  }
+
+  /**
+   * Refund-acknowledgment email — fired when a withdrawal terminates in
+   * `failed`. Wallet balance has already been restored by the settlement
+   * helper before this fires. Same null-check semantics as the receipt.
+   */
+  async sendWithdrawalFailed(args: {
+    to: string;
+    workerName: string;
+    amountNaira: number;
+    bankName: string;
+    accountNumberLast4: string;
+    transactionId: string;
+    failureReason: string | null;
+  }): Promise<void> {
+    const formatted = `₦${args.amountNaira.toLocaleString('en-NG')}`;
+    const subject = `Withdrawal failed — ${formatted} refunded to your wallet`;
+    const reasonLine = args.failureReason
+      ? `Reason: ${args.failureReason}\n\n`
+      : '';
+    const text = `Hi ${args.workerName},\n\nWe couldn't send ${formatted} to ${args.bankName} ****${args.accountNumberLast4}, so it's back in your Forge wallet.\n\n${reasonLine}You can try again any time.\n\nReference: ${args.transactionId}\n\n— Forge`;
+    const html = this.layout({
+      preview: `${formatted} is back in your wallet — withdrawal couldn't go through.`,
+      heading: 'Withdrawal failed — money refunded',
+      body:
+        `<p>Hi ${escapeHtml(args.workerName)},</p>` +
+        `<p>We couldn't send <strong>${escapeHtml(formatted)}</strong> to ` +
+        `<strong>${escapeHtml(args.bankName)} ****${escapeHtml(args.accountNumberLast4)}</strong>, ` +
+        `so it's back in your Forge wallet.</p>` +
+        (args.failureReason
+          ? `<p style="color:#475569;">${escapeHtml(args.failureReason)}</p>`
+          : '') +
+        `<p>You can try again any time.</p>` +
+        `<p style="color:#475569;font-size:13px;">Reference: ${escapeHtml(args.transactionId)}</p>`,
+      ctaLabel: 'Try again',
+      ctaUrl: `forge://transactions/${encodeURIComponent(args.transactionId)}`,
+      footer:
+        `Common reasons: typo in the account number, the receiving bank rejecting the transfer, or a temporary network issue. Reply if you need help.`,
+    });
+    await this.send({ to: args.to, subject, html, text });
+  }
+
   async sendTeamInvite(args: {
     to: string;
     token: string;

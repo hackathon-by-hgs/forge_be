@@ -25,6 +25,10 @@ model Worker {
   id                       String   @id
   name                     String
   phoneNumber              String   @unique @map("phone_number")
+  // Optional — workers auth via phone-OTP, but a worker may opt to provide
+  // an email for transactional notifications (withdrawal receipts/refunds).
+  // Not unique; identity stays on `phoneNumber`.
+  email                    String?
   photoUrl                 String?  @map("photo_url")
   primarySkill             String   @map("primary_skill")
   preferredRadiusKm        Float    @map("preferred_radius_km")

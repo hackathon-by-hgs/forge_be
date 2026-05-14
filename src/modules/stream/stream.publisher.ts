@@ -59,6 +59,14 @@ export type StreamEventName =
   /** §11.7 — a held session moved to a terminal state (confirmed / disputed
    *  / auto-released). Dashboard invalidates the same queue + payments. */
   | 'session.review_resolved'
+  /** §11 worker withdrawals — bank-scope realtime. Fires when a borrower
+   *  (worker with an active loan) makes a withdrawal that reaches a
+   *  terminal state. Bank dashboard invalidates the borrower's loan-detail
+   *  + risk-radar surfaces. */
+  | 'borrower.transaction_updated'
+  /** §11 worker withdrawals — broadcast for platform-admin visibility.
+   *  Admin dashboard filters on this name. Non-admin subscribers ignore. */
+  | 'withdrawal.terminal'
   | 'heartbeat';
 
 export interface StreamEvent {

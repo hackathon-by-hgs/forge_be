@@ -4,6 +4,7 @@ import { AuditService } from '../../common/audit/audit.service';
 import { ID_PREFIXES, newId } from '../../common/utils/ids';
 import { StreamPublisher } from '../stream/stream.publisher';
 import { PushNotificationService } from '../messaging/push-notification.service';
+import { EmailService } from '../dashboard-auth/email.service';
 import type { ClassifiedOutcome } from '../squad/squad-status';
 
 /**
@@ -54,6 +55,7 @@ export class WithdrawalSettlementService {
     private readonly audit: AuditService,
     private readonly stream: StreamPublisher,
     private readonly push: PushNotificationService,
+    private readonly email: EmailService,
   ) {}
 
   async applyTerminalOutcome(input: SettlementInput): Promise<SettlementResult> {
@@ -145,58 +147,81 @@ export class WithdrawalSettlementService {
 
     let pushQueued = false;
     if (txn.kind === 'withdrawal' && txn.workerId && outcome.terminal) {
-      pushQueued = await this.dispatchWithdrawalPush({
+      const fanout = await this.fanOutWithdrawalTerminal({
         transactionId: txn.id,
         workerId: txn.workerId,
         amountNaira: Math.abs(txn.amount),
         bankAccountId: txn.bankAccountId,
         dbStatus: outcome.dbStatus,
         failureReason: outcome.failureReason ?? null,
+        source,
       });
+      pushQueued = fanout.pushQueued;
     }
 
     return { applied: true, refunded, pushQueued };
   }
 
   /**
-   * Build + send the worker-mobile push for a withdrawal terminal state.
+   * Post-commit fan-out for a withdrawal that just hit a terminal state.
+   * Delivers four channels in parallel, all best-effort:
    *
-   * - `completed` → "₦X sent to GTBank ****6789" (`opay_credit` sound).
-   * - `failed`    → "Withdrawal failed — ₦X refunded" (default sound).
+   *  1. **Worker FCM push** — "₦X sent" / "Withdrawal failed — refunded".
+   *     `payment_processed` (opay_credit sound) on success; `payment_refunded`
+   *     (default sound) on failure.
+   *  2. **Worker email** — Resend receipt / refund acknowledgment. Skipped
+   *     silently when `Worker.email` is null (workers auth via OTP and email
+   *     is opt-in; FE profile-edit screen needs a field to populate it).
+   *  3. **Bank-scope SSE** — `borrower.transaction_updated` published to the
+   *     scope of any bank that has an active loan with this worker. Lets the
+   *     bank-credit dashboard react in realtime when a borrower's wallet
+   *     moves (relevant for repayment-risk surfaces).
+   *  4. **Broadcast SSE** — `withdrawal.terminal` for the platform admin
+   *     dashboard. Uses the existing `broadcast` scope; non-admin
+   *     subscribers are expected to filter on event name (the bank/employer
+   *     dashboards don't subscribe to this name today).
    *
-   * Best-effort — errors are swallowed so a downed FCM never rolls back the
-   * wallet/state machine work above.
+   * Errors in any channel never roll back the state-machine work above.
    */
-  private async dispatchWithdrawalPush(args: {
+  private async fanOutWithdrawalTerminal(args: {
     transactionId: string;
     workerId: string;
     amountNaira: number;
     bankAccountId: string | null;
     dbStatus: ClassifiedOutcome['dbStatus'];
     failureReason: string | null;
-  }): Promise<boolean> {
+    source: SettlementSource;
+  }): Promise<{ pushQueued: boolean }> {
+    const isSuccess = args.dbStatus === 'completed';
+    const isFailure = args.dbStatus === 'failed';
+    if (!isSuccess && !isFailure) {
+      // `reversed` is terminal but rare — surfaced via the dashboard, not
+      // the worker's handset / inbox / bank stream.
+      return { pushQueued: false };
+    }
+
+    let bankName = 'your bank';
+    let last4 = '••••';
+    if (args.bankAccountId) {
+      const ba = await this.prisma.bankAccount
+        .findUnique({ where: { id: args.bankAccountId } })
+        .catch(() => null);
+      if (ba) {
+        bankName = ba.bankName;
+        last4 = ba.accountNumber.slice(-4);
+      }
+    }
+    const worker = await this.prisma.worker
+      .findUnique({
+        where: { id: args.workerId },
+        select: { name: true, email: true },
+      })
+      .catch(() => null);
+
+    // 1) Worker push (also writes the in-app feed row).
+    let pushQueued = false;
     try {
-      let bankName = 'your bank';
-      let last4 = '••••';
-      if (args.bankAccountId) {
-        const ba = await this.prisma.bankAccount.findUnique({
-          where: { id: args.bankAccountId },
-        });
-        if (ba) {
-          bankName = ba.bankName;
-          last4 = ba.accountNumber.slice(-4);
-        }
-      }
-
       const notificationId = newId(ID_PREFIXES.notification);
-      const isSuccess = args.dbStatus === 'completed';
-      if (!isSuccess && args.dbStatus !== 'failed') {
-        // `reversed` is also terminal but doesn't need a worker push today
-        // (rare; happens after a manual ops reversal, surfaced via the
-        // dashboard, not the worker's handset).
-        return false;
-      }
-
       await this.prisma.notification.create({
         data: {
           id: notificationId,
@@ -217,12 +242,90 @@ export class WithdrawalSettlementService {
         },
       });
       await this.push.sendForNotificationRow(notificationId);
-      return true;
+      pushQueued = true;
     } catch (err) {
       this.logger.warn(
         `[withdrawal-settlement] push failed for txn=${args.transactionId}: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return false;
     }
+
+    // 2) Worker email (Resend). Optional — skip silently when email is null.
+    if (worker?.email) {
+      const emailArgs = {
+        to: worker.email,
+        workerName: worker.name,
+        amountNaira: args.amountNaira,
+        bankName,
+        accountNumberLast4: last4,
+        transactionId: args.transactionId,
+      };
+      const send = isSuccess
+        ? this.email.sendWithdrawalReceipt(emailArgs)
+        : this.email.sendWithdrawalFailed({
+            ...emailArgs,
+            failureReason: args.failureReason,
+          });
+      void send.catch((err) =>
+        this.logger.warn(
+          `[withdrawal-settlement] email failed for txn=${args.transactionId}: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    }
+
+    // 3) Bank-scope SSE — only when this worker has an active loan with a
+    //    bank. Bank dashboards subscribe to their own scope; emitting
+    //    indiscriminately would leak unrelated workers' transactions.
+    try {
+      const activeLoans = await this.prisma.loan.findMany({
+        where: {
+          workerId: args.workerId,
+          status: 'active',
+          bankId: { not: null },
+        },
+        select: { id: true, bankId: true, outstandingBalance: true },
+      });
+      const seen = new Set<string>();
+      for (const loan of activeLoans) {
+        if (!loan.bankId || seen.has(loan.bankId)) continue;
+        seen.add(loan.bankId);
+        this.stream.publish({
+          scope: { kind: 'bank', id: loan.bankId },
+          event: 'borrower.transaction_updated',
+          data: {
+            workerId: args.workerId,
+            transactionId: args.transactionId,
+            kind: 'withdrawal',
+            status: args.dbStatus,
+            amountNaira: -args.amountNaira,
+            loanId: loan.id,
+            outstandingBalance: loan.outstandingBalance,
+            source: args.source,
+          },
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `[withdrawal-settlement] bank SSE fan-out failed for txn=${args.transactionId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // 4) Broadcast SSE for platform-admin visibility. Admin dashboard
+    //    filters on `event === 'withdrawal.terminal'`. No PII beyond ids.
+    this.stream.publish({
+      scope: { kind: 'broadcast' },
+      event: 'withdrawal.terminal',
+      data: {
+        transactionId: args.transactionId,
+        workerId: args.workerId,
+        status: args.dbStatus,
+        amountNaira: args.amountNaira,
+        bankName,
+        accountNumberLast4: last4,
+        failureReason: args.failureReason,
+        source: args.source,
+      },
+    });
+
+    return { pushQueued };
   }
 }
