@@ -237,5 +237,22 @@ export const appConfig = () => {
         10,
       ),
     },
+
+    // Gemini (Google) — powers `POST /v1/ai/jobs/recommend`. Re-ranks the
+    // top-20 candidate jobs against the worker's history (completed jobs,
+    // tagsTop, primarySkill, ratings) into a personalized list with rationales.
+    // Stub mode (no key) returns a deterministic re-rank so the mobile carousel
+    // renders without a real API call.
+    gemini: {
+      provider: (process.env.GEMINI_PROVIDER ??
+        (process.env.GEMINI_API_KEY ? 'real' : 'stub')) as 'real' | 'stub',
+      apiKey: process.env.GEMINI_API_KEY ?? null,
+      recommendModel:
+        process.env.GEMINI_RECOMMEND_MODEL ?? 'gemini-2.5-flash',
+      recommendTimeoutMs: parseInt(
+        process.env.GEMINI_RECOMMEND_TIMEOUT_MS ?? '4000',
+        10,
+      ),
+    },
   };
 };

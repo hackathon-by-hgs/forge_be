@@ -1,15 +1,18 @@
+
 services:
-  db:
-    image: postgres:16
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: forge
-      POSTGRES_PASSWORD: forge
-      POSTGRES_DB: forge
+      PORT: "8080
     ports:
-      - "5432:5432"
+      - "8080:8080"
     volumes:
-      - forge_pg_data:/var/lib/postgresql/data
+      - forge_uploads:/app/uploads
 
 volumes:
-  forge_pg_data:
+  forge_uploads:

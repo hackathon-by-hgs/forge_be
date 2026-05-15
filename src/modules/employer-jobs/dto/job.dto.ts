@@ -133,10 +133,25 @@ export class JobDto {
   @ApiProperty({ example: 7 })
   applicationsCount!: number;
 
+  @ApiProperty({
+    example: 1,
+    minimum: 1,
+    description:
+      'Slot count set at create-time. 1 = single-worker (legacy / default; uses the `/accept` endpoint). >1 = multi-worker (uses the `/accept-slot` endpoint).',
+  })
+  maxWorkers!: number;
+
+  @ApiProperty({
+    example: 0,
+    description:
+      'How many slots are filled. Multi-worker only — single-worker jobs use `assignedWorkerId` + `filled` instead. The `filled` boolean still flips true once `acceptedCount === maxWorkers` so worker-feed filters keep working.',
+  })
+  acceptedCount!: number;
+
   @ApiPropertyOptional({ nullable: true, example: 'wkr_0042' })
   assignedWorkerId?: string | null;
 
-  @ApiPropertyOptional({ nullable: true, type: () => AssignedWorkerSummaryDto, description: 'Hydrated worker summary. Null until acceptance.' })
+  @ApiPropertyOptional({ nullable: true, type: () => AssignedWorkerSummaryDto, description: 'Hydrated worker summary. Null until acceptance. Single-worker jobs only — multi-worker jobs leave this null and expose accepted workers via the applications list.' })
   assignedWorker!: AssignedWorkerSummaryDto | null;
 
   @ApiPropertyOptional({ nullable: true })

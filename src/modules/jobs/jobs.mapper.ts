@@ -56,6 +56,8 @@ export function toJobDto(
     start_time: job.startTime.toISOString(),
     required_equipment: job.requiredEquipment,
     employer: toEmployerDto(job.employer),
+    max_workers: job.maxWorkers,
+    accepted_count: job.acceptedCount,
     ...(relevance !== undefined ? { relevance_score: relevance } : {}),
   };
 }

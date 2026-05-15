@@ -81,6 +81,8 @@ export interface DashboardJob {
   startedAt: string | null;
   completedAt: string | null;
   applicationsCount: number;
+  maxWorkers: number;
+  acceptedCount: number;
   assignedWorkerId: string | null;
   assignedWorker: DashboardAssignedWorker | null;
   cancelledReason: string | null;
@@ -122,6 +124,8 @@ export function toDashboardJob(j: Job, assignedWorker?: Worker | null): Dashboar
     startedAt: j.startedAt ? j.startedAt.toISOString() : null,
     completedAt: j.completedAt ? j.completedAt.toISOString() : null,
     applicationsCount: j.applicantsCount,
+    maxWorkers: j.maxWorkers,
+    acceptedCount: j.acceptedCount,
     assignedWorkerId: j.assignedWorkerId ?? null,
     assignedWorker: assignedWorker
       ? {

@@ -387,6 +387,56 @@ export class EmployerJobsController {
     return this.jobs.acceptApplication({ userId: me.userId, employerId: me.employerId }, id, appId, req);
   }
 
+  // ── Accept application (multi-worker; siblings stay until full) ─────────
+  @Post(':id/applications/:appId/accept-slot')
+  @HttpCode(HttpStatus.OK)
+  @Roles(Role.BusinessOwner, Role.BusinessAdmin, Role.BusinessHiringManager)
+  @ApiOperation({
+    summary:
+      'Accept one slot on a multi-worker job. Sibling apps stay pending until the LAST slot fills.',
+    description: [
+      '**Audience:** Employer-web. **Powers:** "Accept" CTA on multi-worker jobs (`maxWorkers > 1`).',
+      '',
+      '**When to call this vs `/accept`:** Call this endpoint when `Job.maxWorkers > 1`. Single-worker',
+      'jobs (`maxWorkers = 1`, the default) MUST use the existing `/accept` endpoint — its sibling',
+      'auto-reject + `assignedWorkerId` semantics are unchanged. Calling this endpoint on a single-worker',
+      'job returns `409 INVALID_STATE`.',
+      '',
+      '**Behavior:** Single transaction:',
+      '  1. Re-checks `acceptedCount < maxWorkers` under row lock; 409 SLOTS_FULL if not.',
+      '  2. Marks this application `accepted`; bumps `Job.acceptedCount`.',
+      '  3. Flips `Job.status` to `accepted` on first slot. Sets `Job.filled = true` only when the last',
+      '     slot lands (so the worker-mobile feed naturally hides the job once full).',
+      '  4. Auto-rejects sibling pending applications **only when this accept fills the last slot**.',
+      '  5. Emits the same `application_accepted` JobEvent + worker FCM push as `/accept`.',
+      '  6. Publishes `job.lifecycle_changed` with `{slot, maxWorkers, filled}` so the dashboard can',
+      '     refresh the accepted-workers list without a refetch.',
+      '',
+      '**Errors:** 404 if the application/job is not on this employer. 409 INVALID_STATE for single-',
+      'worker jobs. 409 SLOTS_FULL when capacity is reached.',
+    ].join('\n\n'),
+  })
+  @ApiResponse({ status: 200, type: JobApplicationItemDto })
+  @ApiResponse({ status: 404, type: ErrorResponseDto, description: 'NOT_FOUND' })
+  @ApiResponse({
+    status: 409,
+    type: ErrorResponseDto,
+    description: 'INVALID_STATE | SLOTS_FULL',
+  })
+  acceptApplicationSlot(
+    @CurrentUser() me: AuthedUser,
+    @Param('id') id: string,
+    @Param('appId') appId: string,
+    @Req() req: Request,
+  ): Promise<JobApplicationItemDto> {
+    return this.jobs.acceptApplicationSlot(
+      { userId: me.userId, employerId: me.employerId },
+      id,
+      appId,
+      req,
+    );
+  }
+
   // ── Reject application ───────────────────────────────────────────────────
   @Post(':id/applications/:appId/reject')
   @HttpCode(HttpStatus.OK)

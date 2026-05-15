@@ -310,6 +310,15 @@ model Job {
   payAmount             Int      @map("pay_amount")
   reservedAmountNaira   Int      @default(0) @map("reserved_amount_naira")
   durationHours         Int      @map("duration_hours")
+  // Multi-worker capacity. Default 1 = single-worker (existing behaviour).
+  // When > 1, the new acceptApplicationSlot path enforces a slot count
+  // and the worker-side apply guard checks `acceptedCount < maxWorkers`
+  // instead of `filled`.
+  maxWorkers            Int      @default(1) @map("max_workers")
+  // Denormalised counter — incremented by acceptApplicationSlot, reset by
+  // cancel. Kept off the single-worker path so legacy behaviour is byte-
+  // identical (single-worker uses assignedWorkerId + filled=true).
+  acceptedCount         Int      @default(0) @map("accepted_count")
   lat                   Float
   lng                   Float
   address               String

@@ -42,6 +42,7 @@ import {
 } from './dto/job-mutations.dto';
 import { JobReservationService } from './job-reservation.service';
 import { PushNotificationService } from '../messaging/push-notification.service';
+import { StreamPublisher } from '../stream/stream.publisher';
 import {
   mapDashboardTypeToDbValues,
   mapJobTypeToDashboard,
@@ -87,6 +88,7 @@ export class EmployerJobsService {
     private readonly audit: AuditService,
     private readonly reservation: JobReservationService,
     private readonly push: PushNotificationService,
+    private readonly stream: StreamPublisher,
   ) {}
 
   // ── List (paginated, filterable, sortable) ───────────────────────────────
@@ -353,6 +355,12 @@ export class EmployerJobsService {
         ? Math.round(geofenceKm * 1000)
         : this.config.get<number>('rules.geofenceDefaultRadiusM')!;
 
+    // Multi-worker capacity. Default 1 keeps every existing path unchanged.
+    // Escrow scales linearly: each accepted worker earns the full payNaira,
+    // so `payNaira × maxWorkers` is reserved at publish.
+    const maxWorkers = body.maxWorkers ?? 1;
+    const reserveNaira = body.payNaira * maxWorkers;
+
     const created = await this.prisma.$transaction(async (tx) => {
       const job = await tx.job.create({
         data: {
@@ -363,6 +371,7 @@ export class EmployerJobsService {
           description: body.description.trim(),
           payAmount: body.payNaira,
           durationHours: body.durationHours,
+          maxWorkers,
           lat: body.location.lat,
           lng: body.location.lng,
           address: body.location.address.trim(),
@@ -382,7 +391,7 @@ export class EmployerJobsService {
       // Reserve funds at publish time. Drafts hold no reserve — publish later
       // runs the same reserveOrThrow path.
       if (body.postNow) {
-        await this.reservation.reserveOrThrow(tx, eid, id, body.payNaira);
+        await this.reservation.reserveOrThrow(tx, eid, id, reserveNaira);
       }
       await tx.jobEvent.create({
         data: {
@@ -538,10 +547,14 @@ export class EmployerJobsService {
     }
 
     const eid = this.requireScope(actor.employerId);
+    // Scale escrow by the slot count set at create-time. Single-worker
+    // (maxWorkers=1) reserves exactly payAmount as before — byte-identical.
+    const reserveNaira = before.payAmount * before.maxWorkers;
     const updated = await this.prisma.$transaction(async (tx) => {
-      // Reserve funds for the job's payAmount. Throws 409 INSUFFICIENT_FUNDS
-      // back through the transaction (which rolls back) if wallet is short.
-      await this.reservation.reserveOrThrow(tx, eid, jobId, before.payAmount);
+      // Reserve funds for the job's full per-worker × slot count. Throws
+      // 409 INSUFFICIENT_FUNDS back through the transaction (which rolls
+      // back) if wallet is short.
+      await this.reservation.reserveOrThrow(tx, eid, jobId, reserveNaira);
       const j = await tx.job.update({
         where: { id: jobId },
         data: {
@@ -558,7 +571,7 @@ export class EmployerJobsService {
           kind: 'job_published',
           actorId: actor.userId,
           actorType: 'employer',
-          payload: { reservedNaira: before.payAmount },
+          payload: { reservedNaira: reserveNaira },
         },
       });
       return j;
@@ -570,7 +583,7 @@ export class EmployerJobsService {
       entityType: 'job',
       entityId: jobId,
       before: { status: 'draft' },
-      after: { status: 'open', reservedNaira: before.payAmount },
+      after: { status: 'open', reservedNaira: reserveNaira },
       request: req,
     });
 
@@ -830,6 +843,247 @@ export class EmployerJobsService {
       entityType: 'job_application',
       entityId: appId,
       after: { jobId, workerId: target.workerId },
+      request: req,
+    });
+
+    const item = toDashboardApplication(result.accepted, result.accepted.worker);
+    return { ...item, rankScore: 1 };
+  }
+
+  // ── Accept application (multi-worker; siblings stay until full) ─────────
+  /**
+   * Multi-worker accept path. Mirrors `acceptApplication` but:
+   *  - Requires the job be in multi-worker mode (`maxWorkers > 1`). Single-
+   *    worker jobs MUST use `acceptApplication` (the existing endpoint) so
+   *    the legacy auto-reject-siblings + assignedWorkerId flow stays exact.
+   *  - Counts existing acceptances; rejects with `SLOTS_FULL` (409) when the
+   *    cap is reached.
+   *  - Does NOT auto-reject sibling pending apps until THIS acceptance fills
+   *    the last slot. Workers can keep applying to a 5-slot job that
+   *    already has 2 acceptances.
+   *  - Does NOT set `Job.assignedWorkerId` — that field stays null on
+   *    multi-worker jobs, the FE queries `JobApplication` rows where
+   *    `status='accepted'` to render the accepted-workers list.
+   *  - Increments `Job.acceptedCount` so apply-guard / feed-filter checks
+   *    stay O(1) (no count query per worker request).
+   *
+   * Idempotency: caller-supplied `Idempotency-Key` covers retry safety;
+   * inside the tx, an attempt to re-accept an already-accepted application
+   * surfaces as `INVALID_STATE` (matches the single-worker path).
+   */
+  async acceptApplicationSlot(
+    actor: { userId: string; employerId: string | null },
+    jobId: string,
+    appId: string,
+    req: Request,
+  ): Promise<JobApplicationItemDto> {
+    const job = await this.requireOwnedJob(actor.employerId, jobId);
+    if (job.maxWorkers <= 1) {
+      throw new AppError(
+        409,
+        'INVALID_STATE',
+        'This is a single-worker job — use POST /employer/jobs/:id/applications/:appId/accept instead.',
+      );
+    }
+    if (job.acceptedCount >= job.maxWorkers) {
+      throw new AppError(
+        409,
+        'SLOTS_FULL',
+        `All ${job.maxWorkers} slots on this job are filled.`,
+        { maxWorkers: job.maxWorkers, acceptedCount: job.acceptedCount },
+      );
+    }
+
+    const target = await this.prisma.jobApplication.findFirst({
+      where: { id: appId, jobId },
+      include: { worker: true },
+    });
+    if (!target) throw new AppError(404, 'NOT_FOUND', 'Application not found.');
+    if (target.status !== 'applied' && target.status !== 'pending') {
+      throw new AppError(
+        409,
+        'INVALID_STATE',
+        `Cannot accept an application in status '${target.status}'.`,
+      );
+    }
+
+    const employer = await this.prisma.employer.findUnique({
+      where: { id: job.employerId },
+      select: { businessName: true },
+    });
+    const employerName = employer?.businessName ?? 'The employer';
+
+    const now = new Date();
+    const isLastSlot = job.acceptedCount + 1 >= job.maxWorkers;
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      // Re-check inside the tx in case a concurrent accept just filled the
+      // last slot. Postgres holds the row lock for the duration.
+      const live = await tx.job.findUnique({
+        where: { id: jobId },
+        select: { acceptedCount: true, maxWorkers: true, status: true },
+      });
+      if (!live) throw new AppError(404, 'NOT_FOUND', 'Job not found.');
+      if (live.acceptedCount >= live.maxWorkers) {
+        throw new AppError(
+          409,
+          'SLOTS_FULL',
+          `All ${live.maxWorkers} slots on this job are filled.`,
+          { maxWorkers: live.maxWorkers, acceptedCount: live.acceptedCount },
+        );
+      }
+
+      const accepted = await tx.jobApplication.update({
+        where: { id: appId },
+        data: { status: 'accepted', decidedAt: now },
+        include: { worker: true },
+      });
+
+      // Auto-reject sibling pending applications ONLY when this accept
+      // filled the last slot. Mirrors the single-worker behaviour at the
+      // moment the job becomes uncapacitated.
+      const rejectedSiblings = isLastSlot
+        ? await tx.jobApplication.findMany({
+            where: {
+              jobId,
+              id: { not: appId },
+              status: { in: ['applied', 'pending'] },
+            },
+            select: { id: true, workerId: true },
+          })
+        : [];
+      if (rejectedSiblings.length > 0) {
+        await tx.jobApplication.updateMany({
+          where: { id: { in: rejectedSiblings.map((s) => s.id) } },
+          data: { status: 'rejected', decidedAt: now },
+        });
+      }
+
+      // Job-level: bump counter. Status stays in `open`/`applications_in`
+      // until the last slot lands — that way the worker-mobile feed (which
+      // filters `status IN (open, applications_in) AND filled=false`) keeps
+      // the job visible to remaining applicants. `filled=true` only flips
+      // on the final accept; pairs with `status='accepted'` so the
+      // single-worker filter shape works for multi-worker too.
+      const newAcceptedCount = live.acceptedCount + 1;
+      const becameFull = newAcceptedCount >= live.maxWorkers;
+      await tx.job.update({
+        where: { id: jobId },
+        data: {
+          status: becameFull ? 'accepted' : live.status,
+          acceptedCount: newAcceptedCount,
+          filled: becameFull,
+        },
+      });
+
+      // Timeline events.
+      await tx.jobEvent.create({
+        data: {
+          id: newId(ID_PREFIXES.jobEvent),
+          jobId,
+          kind: 'application_accepted',
+          actorId: actor.userId,
+          actorType: 'employer',
+          payload: {
+            applicationId: appId,
+            workerId: target.workerId,
+            slot: newAcceptedCount,
+            maxWorkers: live.maxWorkers,
+          },
+        },
+      });
+      for (const sib of rejectedSiblings) {
+        await tx.jobEvent.create({
+          data: {
+            id: newId(ID_PREFIXES.jobEvent),
+            jobId,
+            kind: 'application_rejected',
+            actorId: actor.userId,
+            actorType: 'employer',
+            payload: {
+              applicationId: sib.id,
+              workerId: sib.workerId,
+              reason: 'slots_full',
+            },
+          },
+        });
+      }
+
+      // Worker notifications — accepted + (if last slot) the rejected
+      // siblings. Same shape as the single-worker path so the §24 push
+      // pipeline routes identically.
+      const acceptedNotificationId = newId(ID_PREFIXES.notification);
+      await tx.notification.create({
+        data: {
+          id: acceptedNotificationId,
+          workerId: target.workerId,
+          kind: 'application_update',
+          pushKind: 'application_accepted',
+          title: 'Your application was accepted',
+          body: `${job.title} · ₦${job.payAmount.toLocaleString('en-NG')} · ${job.durationHours}h`,
+          timestamp: now,
+          deeplink: `/jobs/${jobId}/clock-in`,
+        },
+      });
+      const rejectedNotificationIds: string[] = [];
+      for (const sib of rejectedSiblings) {
+        const nid = newId(ID_PREFIXES.notification);
+        rejectedNotificationIds.push(nid);
+        await tx.notification.create({
+          data: {
+            id: nid,
+            workerId: sib.workerId,
+            kind: 'application_update',
+            pushKind: 'application_rejected',
+            title: `${employerName} went with someone else`,
+            body: `${job.title}${job.address ? ` at ${job.address}` : ''} · keep applying`,
+            timestamp: now,
+            deeplink: `/jobs/${jobId}/status`,
+          },
+        });
+      }
+
+      return {
+        accepted,
+        acceptedNotificationId,
+        rejectedNotificationIds,
+        newAcceptedCount,
+      };
+    });
+
+    // Post-commit fan-out — best-effort, never blocks the response.
+    void this.push.sendForNotificationRow(result.acceptedNotificationId);
+    for (const nid of result.rejectedNotificationIds) {
+      void this.push.sendForNotificationRow(nid);
+    }
+
+    // SSE for the employer dashboard so the FE can refresh the
+    // accepted-workers list / pending-applicants count without a
+    // refetch. Reuses `job.lifecycle_changed` to avoid bloating the
+    // event vocabulary; payload carries slot accounting.
+    this.stream.publish({
+      scope: { kind: 'employer', id: job.employerId },
+      event: 'job.lifecycle_changed',
+      data: {
+        jobId,
+        status: 'accepted',
+        slot: result.newAcceptedCount,
+        maxWorkers: job.maxWorkers,
+        filled: result.newAcceptedCount >= job.maxWorkers,
+      },
+    });
+
+    await this.audit.record({
+      actor: { type: 'user', id: actor.userId },
+      action: 'employer.application_accept_slot',
+      entityType: 'job_application',
+      entityId: appId,
+      after: {
+        jobId,
+        workerId: target.workerId,
+        slot: result.newAcceptedCount,
+        maxWorkers: job.maxWorkers,
+      },
       request: req,
     });
 

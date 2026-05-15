@@ -1,10 +1,12 @@
 import {
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Param,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -24,8 +26,13 @@ import {
   ProfileExtractRequestDto,
   ProfileExtractResponseDto,
 } from './dto/profile-extract.dto';
+import {
+  JobRecommendQueryDto,
+  JobRecommendResponseDto,
+} from './dto/job-recommend.dto';
 import { JobSummaryService } from './job-summary.service';
 import { ProfileExtractService } from './profile-extract.service';
+import { JobRecommendService } from './job-recommend.service';
 
 @ApiTags('AI')
 @Controller('ai')
@@ -35,6 +42,7 @@ export class AiController {
   constructor(
     private readonly summaries: JobSummaryService,
     private readonly profileExtract: ProfileExtractService,
+    private readonly recommend: JobRecommendService,
   ) {}
 
   @Post('jobs/:id/summarize')
@@ -83,5 +91,31 @@ export class AiController {
     @Body() body: ProfileExtractRequestDto,
   ): Promise<ProfileExtractResponseDto> {
     return this.profileExtract.extract(me.workerId, body);
+  }
+
+  @Get('jobs/recommend')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Personalized job recommendations (Gemini 2.5 Flash, server-cached 15 min).',
+    description: [
+      '**Audience:** Worker mobile. Bearer token (worker JWT).',
+      '**Powers:** "Recommended for you" carousel on the home feed.',
+      '',
+      '**Pipeline:** The standard `/v1/jobs` feed filter narrows to the top-20 candidates by the deterministic weighted score (radius, audience, applied-exclusion, weighted relevance). Gemini then re-ranks that pool against the worker\'s profile — primary skill, top tags from past ratings, last 10 completed jobs (type, pay, neighborhood), and quality stats (`averageRating`, `ratingsCount`, `reliabilityScore`). Each item comes back with a one-line Naija-English `ai_rationale`.',
+      '',
+      '**Cache:** Per-worker, 15-minute TTL, keyed by a coarse location bucket (~1km) so micro GPS jitter still hits cache.',
+      '',
+      '**Stub mode:** When `GEMINI_API_KEY` is unset the BE re-orders the pool deterministically by skill-match then employer rating and derives the rationale from job fields. Mobile contract is identical.',
+      '',
+      '**Failure mode:** If Gemini errors or times out the endpoint returns the candidate pool in feed order with a derived rationale and `meta.provider="fallback"` — no 5xx surfaced to the carousel.',
+    ].join('\n\n'),
+  })
+  @ApiResponse({ status: 200, type: JobRecommendResponseDto })
+  recommendJobs(
+    @CurrentWorker() me: AuthedWorker,
+    @Query() query: JobRecommendQueryDto,
+  ): Promise<JobRecommendResponseDto> {
+    return this.recommend.recommend(me.workerId, query);
   }
 }

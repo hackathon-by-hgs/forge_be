@@ -198,6 +198,27 @@ export class CreateJobDto {
   })
   @IsBoolean()
   postNow!: boolean;
+
+  @ApiPropertyOptional({
+    example: 1,
+    minimum: 1,
+    maximum: 20,
+    default: 1,
+    description: [
+      'Number of workers this job can hire (multi-worker mode).',
+      'Default 1 = single-worker (existing behaviour, single accept auto-rejects siblings).',
+      'When > 1, the dashboard must call the multi-worker accept endpoint',
+      '(`POST /v1/employer/jobs/:jobId/applications/:appId/accept-slot`) instead of the',
+      'single-worker `accept` endpoint. Escrow scales linearly: `payNaira × maxWorkers`',
+      'is reserved at publish time, each worker still earns the full `payNaira` on completion.',
+    ].join(' '),
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  maxWorkers?: number;
 }
 
 /** PATCH body — strict subset of CreateJobDto with all fields optional. */

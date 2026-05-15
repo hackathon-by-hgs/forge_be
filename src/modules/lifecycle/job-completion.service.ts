@@ -186,19 +186,33 @@ export class JobCompletionService {
           : 'insufficient_balance'
         : null;
 
-    // 1) Job status — pending_verification → completed.
+    // 1) Job status — only flip to `completed` when this is the LAST
+    //    accepted worker still in flight. Single-worker (maxWorkers=1)
+    //    auto-rejects all siblings at accept-time, so the count of
+    //    non-terminal accepted apps after this one is always 0 → flips
+    //    immediately, identical to the legacy behaviour. Multi-worker
+    //    (maxWorkers>1) waits until every accepted worker reaches a
+    //    terminal session state before flipping.
+    const remainingAccepted = await tx.jobApplication.count({
+      where: {
+        jobId: job.id,
+        id: { not: session.applicationId },
+        status: { in: ['accepted', 'in_progress', 'pending_verification'] },
+      },
+    });
+    const isLastWorker = remainingAccepted === 0;
     await tx.job.update({
       where: { id: job.id },
       data: {
-        status: 'completed',
-        completedAt: now,
+        status: isLastWorker ? 'completed' : job.status,
+        completedAt: isLastWorker ? now : job.completedAt,
         // Mirror onto Job.startedAt if a session arrived here without ever
         // crossing the in-progress write (defensive).
         startedAt: job.startedAt ?? session.clockInAt,
       },
     });
 
-    // 2) Application → completed.
+    // 2) Application → completed (per-worker; independent of job-level flip).
     await tx.jobApplication.update({
       where: { id: session.applicationId },
       data: { status: 'completed', completedAt: now },

@@ -55,6 +55,21 @@ export class JobDto {
 
   @ApiPropertyOptional({ example: 0.94 })
   relevance_score?: number;
+
+  @ApiProperty({
+    example: 1,
+    minimum: 1,
+    description:
+      'Slot count for this job. 1 = single-worker (default). >1 = multi-worker — the job stays visible in the feed until `accepted_count === max_workers`.',
+  })
+  max_workers!: number;
+
+  @ApiProperty({
+    example: 0,
+    description:
+      'How many slots are already filled. Render "X of Y filled" on the listing card when `max_workers > 1`.',
+  })
+  accepted_count!: number;
 }
 
 export class JobDetailDto extends JobDto {
