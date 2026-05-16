@@ -108,16 +108,26 @@ export class RequestOtpResponseDto {
 
   @ApiProperty({
     enum: OtpChannelUsed,
-    example: OtpChannelUsed.WhatsApp,
-    description:
-      'Channel the OTP was dispatched on. May differ from `preferred_channel` after a fall-through (e.g. push delivery failed and the server fell back to WhatsApp).',
+    example: OtpChannelUsed.Push,
+    description: [
+      'Primary channel the OTP was dispatched on. When the server picks',
+      '`push`, it also fans out to WhatsApp/SMS in parallel so whichever lands',
+      'first reaches the user — in that case this stays `push` and',
+      '`channel_hint` reads "your Forge app or WhatsApp/SMS". May differ from',
+      '`preferred_channel` after a fall-through (e.g. push delivery failed and',
+      'only the WhatsApp leg of the fan-out succeeded).',
+    ].join(' '),
   })
   channel!: OtpChannelUsed;
 
   @ApiProperty({
-    example: 'your WhatsApp',
-    description:
-      'Pre-localised hint for the OTP screen — paste verbatim into copy like "Code sent to {channel_hint}".',
+    example: 'your Forge app or WhatsApp',
+    description: [
+      'Pre-localised hint for the OTP screen — paste verbatim into copy like',
+      '"Code sent to {channel_hint}". When push fan-out fires both channels,',
+      'this expands to "your Forge app or WhatsApp" (or "or SMS" when WhatsApp',
+      'is disabled) so the user knows to check both places.',
+    ].join(' '),
   })
   channel_hint!: string;
 }

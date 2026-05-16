@@ -141,10 +141,22 @@ export class OtpChannelService {
 
   /**
    * Dispatch the OTP via the picked channel. Returns the channel that was
-   * actually used (may differ from `picked.channel` after a fall-through —
-   * e.g. WhatsApp 502 → SMS). The challenge has already been created by the
-   * caller; we never throw on dispatch failure, we just log so the user can
-   * request a resend.
+   * actually reported back to the mobile.
+   *
+   * **Push fan-out:** when the picked channel is `push`, we ALSO fire the
+   * WhatsApp/SMS chain in parallel. Whichever lands first reaches the user;
+   * a single-channel outage (FCM token stale, WhatsApp template held, SMS
+   * route congested) no longer locks a worker out of login. Trade-off: every
+   * push-eligible OTP costs one Squad WhatsApp (or SMS) send on top of the
+   * free FCM push.
+   *
+   * Reported channel: if push and the fallback both succeed, we report
+   * `push` but expand the hint to "your Forge app or WhatsApp" so the OTP
+   * screen tells the user to check both places. Explicit `whatsapp` / `sms`
+   * picks do NOT fan out — the user asked for a specific channel.
+   *
+   * The challenge has already been created by the caller; we never throw on
+   * dispatch failure, we just log so the user can request a resend.
    */
   async sendOtp(
     picked: PickedChannel,
@@ -157,63 +169,97 @@ export class OtpChannelService {
   ): Promise<{ channel: OtpChannel; hint: string }> {
     const { phone, code, challengeId, ttlMinutes } = args;
     const smsBody = `Your Forge code is ${code}. Expires in ${ttlMinutes} min. Don't share this code.`;
-    const waBody = smsBody; // template body identical for now
 
     if (picked.channel === 'push' && picked.device) {
-      const pushInput = {
-        kind: 'auth_otp' as const,
-        notificationId: `otp_${challengeId}`,
-        title: 'Your Forge code',
-        body: `${code} — don't share. Tap to log in.`,
-        deeplink: `forge://auth/verify?challenge=${encodeURIComponent(challengeId)}&code=${encodeURIComponent(code)}`,
-        extraData: { challenge_id: challengeId, code },
-      };
-      // Two paths: registered device (workerId known → prune-on-failure
-      // semantics) vs ephemeral hint from the request body (workerId may
-      // be null for signup, no DB writes either way).
-      const sent =
-        picked.device.workerId !== null
-          ? await this.push.notifyToken(
-              picked.device.workerId,
-              picked.device.deviceId,
-              picked.device.pushToken,
-              pushInput,
-            )
-          : await this.push.notifyEphemeralToken(
-              picked.device.pushToken,
-              pushInput,
-              picked.device.deviceId,
-            );
-      if (sent.delivered) {
-        return { channel: 'push', hint: HINT_BY_CHANNEL.push };
+      const [pushDelivered, fallbackChannel] = await Promise.all([
+        this.dispatchPush(picked.device, code, challengeId),
+        this.dispatchWhatsappWithSmsFallback(phone, smsBody, challengeId),
+      ]);
+      if (pushDelivered) {
+        const hint = fallbackChannel
+          ? `your Forge app or ${fallbackChannel === 'whatsapp' ? 'WhatsApp' : 'SMS'}`
+          : HINT_BY_CHANNEL.push;
+        return { channel: 'push', hint };
       }
       this.logger.warn(
-        `[otp] push channel failed for challenge=${challengeId} — falling through to WhatsApp/SMS`,
+        `[otp] push channel failed for challenge=${challengeId} — fan-out fallback=${fallbackChannel ?? 'none'}`,
       );
-      // Fall through.
+      if (fallbackChannel) {
+        return { channel: fallbackChannel, hint: HINT_BY_CHANNEL[fallbackChannel] };
+      }
+      this.logger.error(
+        `[otp] all channels failed (push fan-out) for ${phone} challenge=${challengeId}`,
+      );
+      return { channel: 'sms', hint: HINT_BY_CHANNEL.sms };
     }
 
-    if (picked.channel === 'whatsapp' || picked.channel === 'push') {
-      const whatsappEnabled = this.config.get<boolean>('otpChannels.whatsappEnabled') ?? true;
-      if (whatsappEnabled) {
-        const outcome = await this.squad.sendSms({ to: phone, message: waBody, channel: 'whatsapp' });
-        if (outcome.accepted) {
-          return { channel: 'whatsapp', hint: HINT_BY_CHANNEL.whatsapp };
-        }
-        this.logger.warn(
-          `[otp] whatsapp dispatch not-accepted for ${phone} challenge=${challengeId}: ${outcome.message}`,
-        );
-      }
+    if (picked.channel === 'whatsapp') {
+      const result = await this.dispatchWhatsappWithSmsFallback(phone, smsBody, challengeId);
+      if (result) return { channel: result, hint: HINT_BY_CHANNEL[result] };
+      return { channel: 'sms', hint: HINT_BY_CHANNEL.sms };
     }
 
     // Final fallback: SMS.
     const outcome = await this.squad.sendSms({ to: phone, message: smsBody, channel: 'sms' });
     if (!outcome.accepted) {
       this.logger.error(
-        `[otp] all channels failed for ${phone} challenge=${challengeId}: ${outcome.message}`,
+        `[otp] sms dispatch not-accepted for ${phone} challenge=${challengeId}: ${outcome.message}`,
       );
     }
     return { channel: 'sms', hint: HINT_BY_CHANNEL.sms };
+  }
+
+  private async dispatchPush(
+    device: NonNullable<PickedChannel['device']>,
+    code: string,
+    challengeId: string,
+  ): Promise<boolean> {
+    const pushInput = {
+      kind: 'auth_otp' as const,
+      notificationId: `otp_${challengeId}`,
+      title: 'Your Forge code',
+      body: `${code} — don't share. Tap to log in.`,
+      deeplink: `forge://auth/verify?challenge=${encodeURIComponent(challengeId)}&code=${encodeURIComponent(code)}`,
+      extraData: { challenge_id: challengeId, code },
+    };
+    // Two paths: registered device (workerId known → prune-on-failure
+    // semantics) vs ephemeral hint from the request body (workerId may
+    // be null for signup, no DB writes either way).
+    const sent =
+      device.workerId !== null
+        ? await this.push.notifyToken(
+            device.workerId,
+            device.deviceId,
+            device.pushToken,
+            pushInput,
+          )
+        : await this.push.notifyEphemeralToken(
+            device.pushToken,
+            pushInput,
+            device.deviceId,
+          );
+    return sent.delivered;
+  }
+
+  private async dispatchWhatsappWithSmsFallback(
+    phone: string,
+    body: string,
+    challengeId: string,
+  ): Promise<'whatsapp' | 'sms' | null> {
+    const whatsappEnabled = this.config.get<boolean>('otpChannels.whatsappEnabled') ?? true;
+    if (whatsappEnabled) {
+      const wa = await this.squad.sendSms({ to: phone, message: body, channel: 'whatsapp' });
+      if (wa.accepted) return 'whatsapp';
+      this.logger.warn(
+        `[otp] whatsapp dispatch not-accepted for ${phone} challenge=${challengeId}: ${wa.message}`,
+      );
+    }
+    const sms = await this.squad.sendSms({ to: phone, message: body, channel: 'sms' });
+    if (sms.accepted) return 'sms';
+    this.logger.warn(
+      `[otp] sms dispatch not-accepted for ${phone} challenge=${challengeId}: ${sms.message}`,
+    );
+    return null;
   }
 
   /**
